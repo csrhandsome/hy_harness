@@ -1,0 +1,15 @@
+[project]
+name = "hy-vla-libero-eval"
+version = "0.1.0"
+description = "Hy-VLA evaluation on LIBERO, LIBERO-plus, and LIBERO-Pro"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "hy-vla", "robosuite==1.4.1", "mujoco==2.3.7", "bddl==1.0.1",
+    "easydict>=1.9", "cloudpickle>=2.1", "gym==0.25.2",
+    "future>=0.18.2", "pyyaml>=6.0", "imageio[ffmpeg]>=2.35",
+    "wand>=0.6.13", "usd-core>=25.5",
+]
+[tool.uv]
+package = false
+[tool.uv.sources]
+hy-vla = { path = "..", editable = true }

@@ -1,0 +1,21 @@
+id: hy-embodied-vlm-1.0
+name: Hy-Embodied-VLM-1.0
+status: ready
+runtime: vllm
+repository: tencent/Hy-Embodied-VLM-1.0
+served_name: hy_a3b
+description: "Official vLLM plugin for the Tencent MoE embodied VLM."
+
+defaults:
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.85
+  max_model_len: 32768
+
+runtime_options:
+  plugin: plugins/hy-embodied-vlm-1.0
+  trust_remote_code: true
+  enforce_eager: true
+  reasoning_parser: hunyuan_v3
+  tool_call_parser: hy_v3
+  limit_mm_per_prompt: '{"image":128,"video":0}'
+  chat_template: chat_template.jinja

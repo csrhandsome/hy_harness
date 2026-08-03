@@ -1,0 +1,5 @@
+assets: /data/codes/grade_two/github/robot/Hy-Embodied-0.5-VLA/third_party/LIBERO-plus/libero/libero/assets
+bddl_files: /data/codes/grade_two/github/robot/Hy-Embodied-0.5-VLA/third_party/LIBERO-plus/libero/libero/bddl_files
+benchmark_root: /data/codes/grade_two/github/robot/Hy-Embodied-0.5-VLA/third_party/LIBERO-plus/libero/libero
+datasets: /data/codes/grade_two/github/robot/Hy-Embodied-0.5-VLA/third_party/LIBERO-plus/libero/datasets
+init_states: /data/codes/grade_two/github/robot/Hy-Embodied-0.5-VLA/third_party/LIBERO-plus/libero/libero/init_files

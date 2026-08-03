@@ -1,0 +1,2 @@
+Vendored from https://github.com/Tencent-Hunyuan/HY-Embodied
+path: Hy-Embodied-VLM-1.0/inference/vllm

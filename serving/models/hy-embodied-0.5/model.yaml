@@ -1,0 +1,15 @@
+id: hy-embodied-0.5
+name: HY-Embodied-0.5 MoT-2B
+status: ready
+runtime: transformers
+repository: tencent/HY-Embodied-0.5
+served_name: hy_embodied_0_5
+description: "Transformers OpenAI-compatible service; upstream has no official vLLM runtime."
+
+defaults:
+  max_model_len: 8192
+  device: cuda
+  dtype: bfloat16
+
+runtime_options:
+  trust_remote_code: true

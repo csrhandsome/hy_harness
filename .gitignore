@@ -61,3 +61,7 @@ data/processed/
 _tmp_*.sh
 *_local.*
 *_local
+
+
+# third party
+third_party/

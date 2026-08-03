@@ -1,0 +1,32 @@
+# LIBERO-Pro perturbation settings (benchmark ≠ VLA-Adapter Pro weights).
+# Paths are rewritten to absolute paths by run_libero_pro_eval.py.
+
+bddl_files_path: "third_party/LIBERO-PRO/libero/libero/bddl_files"
+script_path: "third_party/LIBERO-PRO/notebooks/generate_init_states.py"
+init_file_dir: "third_party/LIBERO-PRO/libero/libero/init_files"
+
+# Enable exactly one perturbation for the official single-type protocol.
+# For multi-type combos, enable multiple flags (suite becomes *_temp).
+# Note: HF dataset zhouxueyang/LIBERO-Pro ships lan/object/swap/task (no *_env).
+# use_environment requires local generation via perturbation.create_env.
+use_environment: false
+use_swap: true
+use_object: false
+use_language: false
+use_task: false
+
+ood_task_configs:
+  environment: "third_party/LIBERO-PRO/libero_ood/ood_environment.yaml"
+  swap: "third_party/LIBERO-PRO/libero_ood/ood_spatial_relation.yaml"
+  object: "third_party/LIBERO-PRO/libero_ood/ood_object.yaml"
+  language: "third_party/LIBERO-PRO/libero_ood/ood_language.yaml"
+  task: "third_party/LIBERO-PRO/libero_ood/ood_task.yaml"
+
+perturbation_mapping:
+  use_environment: env
+  use_swap: swap
+  use_object: object
+  use_language: lan
+  use_task: task
+
+seed: 42

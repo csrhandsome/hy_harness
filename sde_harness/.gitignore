@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local secrets / machine-specific env (CURSOR_API_KEY, etc.).
+.env.local
+
+# CodeBuddy project settings (harness may write models.json for OpenAI endpoints).
+.codebuddy/
+
+# Local run outputs.
+logs/
+
+/resources/
+
+# Prefer the repo-root .venv (uv workspace). Ignore a leftover local venv.
+.venv/
+# Lockfile lives at repo root; do not keep a nested one.
+uv.lock
+
+build/
+.claude/settings.json

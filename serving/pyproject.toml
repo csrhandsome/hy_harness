@@ -1,0 +1,38 @@
+[project]
+name = "hy-vla-serving"
+version = "0.2.0"
+description = "Configuration-driven vLLM and Transformers serving for Hy-Embodied models"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "vllm==0.14.1", "hy-embodied-vllm-plugin", "fastapi>=0.115",
+    "uvicorn[standard]>=0.30", "accelerate>=1.0", "transformers==4.57.6",
+    "openai>=1.30", "pillow", "huggingface-hub",
+]
+
+[project.scripts]
+vla-serving = "vla_serving.cli:main"
+hy-vla-serving = "vla_serving.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+hy-embodied-vllm-plugin = { path = "plugins/hy-embodied-vlm-1.0", editable = true }
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
