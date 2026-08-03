@@ -3,8 +3,8 @@
 Mirror of ``claude_code.py``: a thin, SDK-first backend for RPent.
 ``solve()`` prepares output files, binds the in-process toolkit via
 ``create_sdk_mcp_server``, drives the SDK query, and assembles a
-``PlannerResult``. Requires ``CODEBUDDY_API_KEY`` (or an existing
-``codebuddy`` CLI login) and the ``codebuddy-agent-sdk`` package.
+``PlannerResult``. Requires the ``codebuddy-agent-sdk`` package; the default
+local vLLM route uses ``CODEBUDDY_API_KEY=EMPTY`` and needs no remote login.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from rpent.utils.logging import get_logger, init_output_dir
 
 logger = get_logger("codebuddy")
 
-DEFAULT_MODEL = "deepseek-v3.1"
+DEFAULT_MODEL = "hy_a3b"
 
 # ---------------------------------------------------------------------------
 # Public backend
@@ -282,7 +282,7 @@ class CodeBuddyPlanner:
         # OpenAI-compatible endpoint (e.g. local vLLM): inject project models.json
         # and load project settings. Otherwise keep isolation (no filesystem settings).
         setting_sources: list[str] = []
-        openai_base = os.environ.get("CODEBUDDY_OPENAI_BASE_URL", "").strip()
+        openai_base = os.environ.get("CODEBUDDY_OPENAI_BASE_URL", "http://127.0.0.1:8080/v1").strip()
         if openai_base:
             chat_url = _normalize_openai_chat_url(openai_base)
             if "CODEBUDDY_API_KEY" not in env:

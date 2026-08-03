@@ -35,3 +35,17 @@ img_history_interval: 5
 # --- UMI coordinate frame ------------------------------------------------
 umi_coord_frame: False
 umi_gripper_space: False
+
+# --- Optional embedded RPent Harness -------------------------------------
+# Default false keeps the official direct policy evaluation unchanged.
+# Set enabled=true (or ROBOTWIN_HARNESS=1) to run the Planner and Toolkit
+# against the live RoboTwin TASK_ENV from deploy_policy.py.
+harness:
+  enabled: false
+  planner: codebuddy
+  model: hy_a3b
+  max_turns: 100
+  max_tokens: 8192
+  # Optional timeout for cursor/code-oriented planners (seconds).
+  # planner_timeout_s: 1200
+  # output_dir: logs/robotwin_harness

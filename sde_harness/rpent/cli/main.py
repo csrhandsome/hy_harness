@@ -89,15 +89,15 @@ def _build_argparser() -> argparse.ArgumentParser:
                     help="Environment backend: libero.")
 
     # models
-    ap.add_argument("--planner", default="api",
+    ap.add_argument("--planner", default="codebuddy",
                     choices=["api", "claude_code", "codex", "cursor", "codebuddy"],
-                    help="LLM backend: api | claude_code | codex | cursor | codebuddy.")
+                    help="LLM backend: api | claude_code | codex | cursor | codebuddy (default: codebuddy).")
     ap.add_argument("--model", default=None,
                     help="Model id. For the 'api' planner, prefix the provider "
                          "(e.g. anthropic:claude-opus-4-8, openai:gpt-5.5, "
                          "openai-chat:glm-5.2). For claude_code/codex/cursor/"
                          "codebuddy this overrides the backend default model "
-                         "(cursor default: composer-2.5; codebuddy: deepseek-v3.1).")
+                         "(codebuddy default: hy_a3b; cursor: composer-2.5).")
     ap.add_argument("--base-url", default=None,
                     help="API base URL. Defaults to the selected backend's base URL env var.")
     ap.add_argument("--max-turns", type=int, default=100)

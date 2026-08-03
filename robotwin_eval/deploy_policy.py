@@ -32,11 +32,35 @@ RoboTwin policy slot) and point ``--config`` at the bundled
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .policy_wrapper import HyVLAPolicyWrapper, build_policy
+
+
+def _harness_policy(policy: HyVLAPolicyWrapper, usr_args: dict[str, Any]) -> Any:
+    """Optionally wrap the normal policy with the embedded RPent Planner."""
+    harness_config = usr_args.get("harness") or {}
+    enabled = bool(harness_config.get("enabled", False)) or os.environ.get(
+        "ROBOTWIN_HARNESS", ""
+    ).lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return policy
+
+    repo_root = Path(__file__).resolve().parents[1]
+    harness_root = repo_root / "sde_harness"
+    os.environ.setdefault("SDE_HARNESS_ROOT", str(harness_root))
+    os.environ.setdefault("HY_VLA_ROOT", str(repo_root))
+    if str(harness_root) not in sys.path:
+        sys.path.insert(0, str(harness_root))
+
+    from robots.robotwin.session import RobotTwinHarnessPolicy
+
+    return RobotTwinHarnessPolicy(policy, harness_config)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +124,7 @@ def encode_obs(observation: dict[str, Any], instruction: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 def get_model(usr_args: dict[str, Any]) -> HyVLAPolicyWrapper:
     """Factory called once per evaluation run by RoboTwin."""
-    return build_policy(usr_args)
+    return _harness_policy(build_policy(usr_args), usr_args)
 
 
 def eval(TASK_ENV, model: HyVLAPolicyWrapper, observation: dict[str, Any]) -> None:  # noqa: A001
@@ -110,6 +134,10 @@ def eval(TASK_ENV, model: HyVLAPolicyWrapper, observation: dict[str, Any]) -> No
     the wrapper for one 16-d action, and forward it back via
     ``TASK_ENV.take_action(..., action_type='ee')``.
     """
+    if getattr(model, "is_harness", False):
+        model.run(TASK_ENV, observation, encode_obs)
+        return
+
     instruction = TASK_ENV.get_instruction()
     batch = encode_obs(observation, instruction)
     action = model.get_action(batch)

@@ -22,4 +22,4 @@ echo "Hy-VLA harness: variant=${VARIANT} suite=${TASK_SUITE} checkpoint=${CKPT_P
 uv run --extra harness python -m rpent.cli.main \
   --env libero --libero-type "${VARIANT}" --suite "${TASK_SUITE}" \
   --task "${TASK:-0}" --seed "${SEED:-0}" --adapter-checkpoint "${CKPT_PATH}" \
-  --planner "${PLANNER:-cursor}" --model "${MODEL:-composer-2.5}" "${@:2}"
+  --planner "${PLANNER:-codebuddy}" --model "${MODEL:-hy_a3b}" "${@:2}"
