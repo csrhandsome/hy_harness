@@ -65,6 +65,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("hunyuan_v3", command)
         self.assertIn("--tool-call-parser", command)
         self.assertIn("hy_v3", command)
+        self.assertIn("--enable-auto-tool-choice", command)
 
     def test_environment_overrides_vllm_defaults(self) -> None:
         model = self.registry.select("hy-embodied-vlm-1.0")

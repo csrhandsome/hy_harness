@@ -90,7 +90,7 @@ class NativeLiberoEnv:
         suite_name: str,
         task_id: int,
         seed: int,
-        max_episode_steps: int = 600,
+        max_episode_steps: int = 10000,
         resolution: int = 256,
     ):
         from libero.libero import benchmark, get_libero_path
@@ -168,9 +168,12 @@ class NativeLiberoEnv:
         raw, reward, done, info = self._env.step(action.tolist())
         self._raw_obs = raw
         self._steps += 1
-        success = self._success() or bool(done)
         truncated = self._steps >= self.max_episode_steps
-        terminated = bool(success)
+        # Native LIBERO can report a horizon stop through done. Do not turn
+        # that time-limit event into task success.
+        terminated = self._success() or (bool(done) and not truncated)
+        terminated = bool(terminated)
+        truncated = bool(truncated)
         self._done = terminated or truncated
         obs = self._build_policy_obs(raw)
         return obs, float(reward), terminated, truncated, _to_numpy_tree(info)
@@ -186,6 +189,8 @@ class NativeLiberoEnv:
         terms = []
         truncs = []
         last_info: dict[str, Any] = {}
+        last_term = False
+        last_trunc = False
         for a in actions:
             obs, rew, term, trunc, info = self.step(a)
             obs_list.append(obs)
@@ -193,12 +198,14 @@ class NativeLiberoEnv:
             terms.append(term)
             truncs.append(trunc)
             last_info = info
+            last_term = bool(term)
+            last_trunc = bool(trunc)
             if self._done:
-                # Pad remaining signals so shapes stay [chunk].
+                # Preserve the reason the episode ended when padding.
                 while len(terms) < len(actions):
                     rewards.append(0.0)
-                    terms.append(True)
-                    truncs.append(False)
+                    terms.append(last_term)
+                    truncs.append(last_trunc)
                     if return_all_frames:
                         obs_list.append(obs)
                 break
@@ -384,14 +391,32 @@ def main():
     p.add_argument("--suite", type=str, default="libero_spatial")
     p.add_argument("--task", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--max-episode-steps", type=int, default=600)
+    p.add_argument("--max-episode-steps", type=int, default=10000)
     p.add_argument(
         "--libero-type",
         default=None,
         choices=["standard", "pro", "plus"],
         help="LIBERO variant (defaults to LIBERO_TYPE env / pro)",
     )
+    p.add_argument(
+        "--cuda-device", type=int, default=None,
+        help="GPU device to pin Native LIBERO EGL rendering to.",
+    )
     args = p.parse_args()
+
+    if args.cuda_device is not None:
+        prev = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if prev is not None:
+            logger.warning(
+                "CUDA_VISIBLE_DEVICES=%s is set; clearing it and pinning via "
+                "MUJOCO_EGL_DEVICE_ID + --cuda-device=%s",
+                prev, args.cuda_device,
+            )
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        from rpent.utils.egl import configure_egl_device
+        configure_egl_device(args.cuda_device)
+        import torch
+        torch.cuda.set_device(args.cuda_device)
 
     libero_type = args.libero_type or get_libero_type()
     _configure_libero_imports(libero_type)

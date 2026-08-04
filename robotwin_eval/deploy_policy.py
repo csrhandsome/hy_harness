@@ -21,7 +21,7 @@ public symbols (the contract RoboTwin expects):
 
 * ``encode_obs(observation, instruction)`` -- dict packing helper used
   by ``eval``; exposed so user scripts can replay it offline.
-* ``get_model(usr_args)`` -- factory returning a ``HyVLAPolicyWrapper``.
+* ``get_model(usr_args)`` -- factory returning a ``RemoteRobotwinPolicy``.
 * ``eval(TASK_ENV, model, observation)`` -- per-step closed-loop hook.
 * ``reset_model(model)`` -- per-episode hook.
 
@@ -39,10 +39,10 @@ from typing import Any
 
 import numpy as np
 
-from .policy_wrapper import HyVLAPolicyWrapper, build_policy
+from .remote_policy import RemoteRobotwinPolicy
 
 
-def _harness_policy(policy: HyVLAPolicyWrapper, usr_args: dict[str, Any]) -> Any:
+def _harness_policy(policy: RemoteRobotwinPolicy, usr_args: dict[str, Any]) -> Any:
     """Optionally wrap the normal policy with the embedded RPent Planner."""
     harness_config = usr_args.get("harness") or {}
     enabled = bool(harness_config.get("enabled", False)) or os.environ.get(
@@ -85,7 +85,7 @@ def _pad_state(state: np.ndarray, max_state_dim: int = 32) -> np.ndarray:
 
 def encode_obs(observation: dict[str, Any], instruction: str) -> dict[str, Any]:
     """Pack a RoboTwin ``observation`` dict + language instruction into the
-    batch format expected by ``HyVLAPolicyWrapper.get_action``.
+    batch format expected by ``RemoteRobotwinPolicy.get_action``.
 
     The dual-arm 16-d EE state uses RoboTwin's native quaternion layout
     (wxyz). The wxyz->xyzw flip happens inside the wrapper.
@@ -122,12 +122,12 @@ def encode_obs(observation: dict[str, Any], instruction: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # RoboTwin hooks
 # ---------------------------------------------------------------------------
-def get_model(usr_args: dict[str, Any]) -> HyVLAPolicyWrapper:
+def get_model(usr_args: dict[str, Any]) -> RemoteRobotwinPolicy:
     """Factory called once per evaluation run by RoboTwin."""
-    return _harness_policy(build_policy(usr_args), usr_args)
+    return _harness_policy(RemoteRobotwinPolicy(usr_args), usr_args)
 
 
-def eval(TASK_ENV, model: HyVLAPolicyWrapper, observation: dict[str, Any]) -> None:  # noqa: A001
+def eval(TASK_ENV, model: RemoteRobotwinPolicy, observation: dict[str, Any]) -> None:  # noqa: A001
     """Per-step closed-loop hook.
 
     RoboTwin calls this in a tight loop; we pack the observation, query
@@ -144,7 +144,7 @@ def eval(TASK_ENV, model: HyVLAPolicyWrapper, observation: dict[str, Any]) -> No
     TASK_ENV.take_action(action, action_type="ee")
 
 
-def reset_model(model: HyVLAPolicyWrapper) -> str:
+def reset_model(model: RemoteRobotwinPolicy) -> str:
     """Per-episode reset hook."""
     return model.reset()
 

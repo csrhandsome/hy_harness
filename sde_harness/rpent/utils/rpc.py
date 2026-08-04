@@ -32,11 +32,20 @@ def wait_for_ready(
     *,
     timeout_s: float = 300.0,
     poll_interval_s: float = 0.5,
+    daemon: "ProcessDaemon | None" = None,
 ) -> None:
-    """Poll ``client.call("healthz")`` until it succeeds or ``timeout_s`` elapses."""
+    """Poll healthz, failing fast if a spawned server exits early."""
     deadline = time.time() + timeout_s
     last_err: Exception | None = None
     while time.time() < deadline:
+        if daemon is not None:
+            rc = daemon.poll()
+            if rc is not None:
+                detail = last_err if last_err is not None else "no healthz attempt yet"
+                raise RuntimeError(
+                    f"{daemon.name} exited with code {rc} before becoming ready; "
+                    f"check its log. last healthz error: {detail}"
+                )
         try:
             client.call("healthz", timeout_s=1.0)
             return

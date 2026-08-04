@@ -147,9 +147,7 @@ class CodeBuddyPlanner:
                         async for message in sdk.query(prompt=prompt, options=options):
                             _emit(message)
                             if recorder.finish_result is not None:
-                                logger.info(
-                                    "FINISH called: %s", recorder.finish_result
-                                )
+                                logger.info("FINISH called: %s", recorder.finish_result)
                                 break
 
                     await asyncio.wait_for(consume_stream(), timeout=self._timeout_s)
@@ -282,9 +280,16 @@ class CodeBuddyPlanner:
         # OpenAI-compatible endpoint (e.g. local vLLM): inject project models.json
         # and load project settings. Otherwise keep isolation (no filesystem settings).
         setting_sources: list[str] = []
-        openai_base = os.environ.get("CODEBUDDY_OPENAI_BASE_URL", "http://127.0.0.1:8080/v1").strip()
+        openai_base = os.environ.get(
+            "CODEBUDDY_OPENAI_BASE_URL", "http://127.0.0.1:8080/v1"
+        ).strip()
         if openai_base:
             chat_url = _normalize_openai_chat_url(openai_base)
+            # The SDK launches CodeBuddy as a child process and otherwise
+            # inherits shell proxy variables.  A corporate HTTP proxy often
+            # cannot route a loopback/private vLLM endpoint, so extend
+            # NO_PROXY for the configured OpenAI-compatible service.
+            _add_openai_endpoint_to_no_proxy(env, chat_url)
             if "CODEBUDDY_API_KEY" not in env:
                 env["CODEBUDDY_API_KEY"] = self._api_key or "EMPTY"
             _write_project_openai_model(
@@ -494,7 +499,8 @@ class _Recorder:
         return " ".join(p for p in parts if p) + usage_line + "\n"
 
     def _add_usage(self, usage: Any) -> None:
-        if not isinstance(usage, dict):
+        usage = _usage_dict(usage)
+        if not usage:
             return
         self.usage["total_input_tokens"] += int(usage.get("input_tokens") or 0)
         self.usage["total_output_tokens"] += int(usage.get("output_tokens") or 0)
@@ -506,7 +512,8 @@ class _Recorder:
         )
 
     def _set_usage(self, usage: Any) -> None:
-        if not isinstance(usage, dict):
+        usage = _usage_dict(usage)
+        if not usage:
             return
         self.usage = {
             "total_input_tokens": int(usage.get("input_tokens") or 0),
@@ -542,9 +549,7 @@ def _build_rpent_server(sdk: Any, *, toolkit: Toolkit) -> Any:
         run_tool.__name__ = f"rpent_{name}"
         sdk_tools.append(sdk.tool(name, description, input_schema)(run_tool))
 
-    return sdk.create_sdk_mcp_server(
-        name="rpent", version="0.1.0", tools=sdk_tools
-    )
+    return sdk.create_sdk_mcp_server(name="rpent", version="0.1.0", tools=sdk_tools)
 
 
 def _tool_result_to_mcp(tr: Any) -> dict[str, Any]:
@@ -587,6 +592,29 @@ def _normalize_openai_chat_url(base: str) -> str:
     if url.endswith("/v1"):
         return f"{url}/chat/completions"
     return f"{url}/v1/chat/completions"
+
+
+def _add_openai_endpoint_to_no_proxy(env: dict[str, str], chat_url: str) -> None:
+    """Ensure the configured OpenAI-compatible host bypasses inherited proxies."""
+    from urllib.parse import urlparse
+
+    hostname = urlparse(chat_url).hostname
+    if not hostname:
+        return
+
+    existing = (
+        env.get("NO_PROXY")
+        or env.get("no_proxy")
+        or os.environ.get("NO_PROXY")
+        or os.environ.get("no_proxy", "")
+    )
+    entries = [part.strip() for part in existing.split(",") if part.strip()]
+    if hostname not in entries:
+        entries.append(hostname)
+    # Some HTTP stacks only inspect lowercase while others inspect uppercase.
+    value = ",".join(entries)
+    env["NO_PROXY"] = value
+    env["no_proxy"] = value
 
 
 def _write_project_openai_model(
@@ -632,6 +660,15 @@ def _get(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
     return getattr(value, key, default)
+
+
+def _usage_dict(usage: Any) -> dict[str, Any]:
+    """Return ``usage`` as a dict, whether the SDK sends a dataclass or raw dict."""
+    if isinstance(usage, dict):
+        return usage
+    if dataclasses.is_dataclass(usage):
+        return dataclasses.asdict(usage)
+    return {}
 
 
 def _message_to_json(message: Any) -> dict[str, Any]:

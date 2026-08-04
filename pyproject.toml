@@ -43,7 +43,7 @@ dependencies = [
     # Core deep-learning stack (cu128 wheel selected via tool.uv.sources).
     "torch>=2.7,<2.8",
     "numpy>=1.24,<2.0",
-    "transformers>=4.57",
+    "transformers>=4.57.1,<5",
     "safetensors>=0.4",
     "huggingface-hub>=0.23",
     # Vision backbone
@@ -74,25 +74,14 @@ dependencies = [
     "matplotlib>=3.7",
     "imageio>=2.35",
     "imageio-ffmpeg>=0.5",
+    "vla-protocol",
 ]
 
 [project.optional-dependencies]
-libero = [
-    "robosuite==1.4.1", "mujoco==2.3.7", "bddl==1.0.1",
-    "easydict>=1.9", "cloudpickle>=2.1", "gym==0.25.2",
-    "future>=0.18.2", "pyyaml>=6.0", "imageio[ffmpeg]>=2.35",
-    "wand>=0.6.13", "usd-core>=25.5",
-]
-harness = [
-    "robosuite==1.4.1", "mujoco==2.3.7", "bddl==1.0.1",
-    "easydict>=1.9", "cloudpickle>=2.1", "gym==0.25.2",
-    "future>=0.18.2", "pyyaml>=6.0", "wand>=0.6.13", "usd-core>=25.5",
-    "pydantic-ai-slim[anthropic,openai]>=2.1", "pydantic>=2",
-    "fastapi>=0.110", "uvicorn>=0.27", "httpx>=0.27",
-    "claude-agent-sdk>=0.1.60", "openai-codex>=0.1.0b3",
-    "cursor-sdk>=1.0.0", "codebuddy-agent-sdk>=0.3.0",
-    "prompt-toolkit>=3.0.48",
-]
+harness = ["sde-harness"]
+
+[project.scripts]
+vla-policy-server = "hy_vla.policy_server.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Tencent-Hunyuan/Hy-Embodied-0.5-VLA"
@@ -123,6 +112,10 @@ override-dependencies = [
     "opencv-python ; sys_platform == 'never'",
 ]
 
+[tool.uv.workspace]
+members = ["sde_harness", "packages/vla_protocol"]
+exclude = ["libero_eval", "serving"]
+
 # ---- PyTorch CUDA wheel selection ------------------------------------------
 # uv lets us register a package index and route a single requirement
 # (`torch`) to it. Official pattern:
@@ -146,6 +139,9 @@ flash-attn = [
     { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "python_version == '3.12'" },
 ]
 
+vla-protocol = { workspace = true }
+sde-harness = { workspace = true }
+
 # =============================================================================
 # Hatch — tells hatch which package directories to ship in the wheel
 # =============================================================================
@@ -153,4 +149,4 @@ flash-attn = [
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["hy_vla", "libero_eval"]
+packages = ["hy_vla", "libero_eval", "robotwin_eval"]

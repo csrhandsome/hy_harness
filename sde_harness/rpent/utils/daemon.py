@@ -74,6 +74,10 @@ class ProcessDaemon:
         self._proc: subprocess.Popen | None = None
         self._log_f = None
 
+    def poll(self) -> int | None:
+        """Return the subprocess exit code, or None while it is running."""
+        return self._proc.poll() if self._proc is not None else None
+
     def start(self) -> None:
         """Spawn the subprocess. Returns immediately; does not wait for readiness."""
         self._log_f = (

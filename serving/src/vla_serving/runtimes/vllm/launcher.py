@@ -33,6 +33,10 @@ def build_command(registry: Registry, model: ModelConfig) -> list[str]:
     _flag(args, "--limit-mm-per-prompt", options.get("limit_mm_per_prompt"))
     _flag(args, "--reasoning-parser", options.get("reasoning_parser"))
     _flag(args, "--tool-call-parser", options.get("tool_call_parser"))
+    # Required for OpenAI-compatible clients that send ``tool_choice="auto"``
+    # (including the CodeBuddy Agent SDK used by the embedded harness).
+    if options.get("enable_auto_tool_choice"):
+        args.append("--enable-auto-tool-choice")
 
     template_name = options.get("chat_template")
     if template_name and (cache / str(template_name)).is_file():

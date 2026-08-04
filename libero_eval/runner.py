@@ -15,10 +15,9 @@ from typing import Any
 
 import imageio.v2 as imageio
 import numpy as np
-import torch
 import yaml
 
-from libero_eval.policy_wrapper import HyVLALiberoPolicy
+from libero_eval.remote_policy import RemoteLiberoPolicy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_ROOT = Path(__file__).resolve().parent
@@ -154,7 +153,7 @@ def task_ids_for_plus(args, suite, package_root: Path) -> list[int]:
     return selected
 
 
-def run_episode(args, env, initial_state, instruction: str, policy: HyVLALiberoPolicy):
+def run_episode(args, env, initial_state, instruction: str, policy: RemoteLiberoPolicy):
     env.reset()
     obs = env.set_init_state(initial_state) if initial_state is not None else env.get_observation()
     policy.reset()
@@ -179,20 +178,13 @@ def run_episode(args, env, initial_state, instruction: str, policy: HyVLALiberoP
 
 def build_parser(variant: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"Evaluate Hy-VLA on LIBERO ({variant}).")
-    parser.add_argument("--checkpoint", "--pretrained_checkpoint", dest="checkpoint", required=True)
-    parser.add_argument("--norm-path", default=None)
-    parser.add_argument("--vlm-model-path", default=None)
+    parser.add_argument("--policy-endpoint", default=os.environ.get("POLICY_ENDPOINT", "http://127.0.0.1:8001"))
+    parser.add_argument("--policy-timeout-s", type=float, default=120.0)
+    parser.add_argument("--checkpoint", "--pretrained_checkpoint", dest="checkpoint", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--task-suite-name", "--task_suite_name", default="libero_spatial")
     parser.add_argument("--num-trials-per-task", "--num_trials_per_task", type=int, default=1 if variant == "plus" else 20)
-    parser.add_argument("--num-open-loop-steps", "--num_open_loop_steps", type=int, default=None)
     parser.add_argument("--num-steps-wait", "--num_steps_wait", type=int, default=10)
     parser.add_argument("--env-img-res", "--env_img_res", type=int, default=256)
-    parser.add_argument("--action-dim", type=int, default=7)
-    parser.add_argument("--gripper-mode", choices=["libero", "openvla", "raw"], default="libero")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
-    parser.add_argument("--img-history-size", type=int, default=None)
-    parser.add_argument("--img-history-interval", type=int, default=1)
     parser.add_argument("--max-tasks", "--max_tasks", type=int, default=0)
     parser.add_argument("--start-task-id", "--start_task_id", type=int, default=0)
     parser.add_argument("--perturbation-category", "--perturbation_category", default="")
@@ -210,7 +202,6 @@ def evaluate(variant: str, argv: list[str] | None = None) -> float:
         logger.warning("ignoring legacy VLA-Adapter arguments: %s", " ".join(unknown))
     random.seed(args.seed)
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
     benchmark, OffScreenRenderEnv, get_libero_path, package_root = configure_libero(variant)
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -221,18 +212,7 @@ def evaluate(variant: str, argv: list[str] | None = None) -> float:
     if args.task_suite_name not in benchmark_dict:
         raise KeyError(f"suite {args.task_suite_name!r} is unavailable")
 
-    policy = HyVLALiberoPolicy(
-        args.checkpoint,
-        norm_path=args.norm_path,
-        vlm_model_path=args.vlm_model_path,
-        action_dim=args.action_dim,
-        num_open_loop_steps=args.num_open_loop_steps,
-        gripper_mode=args.gripper_mode,
-        device=args.device,
-        dtype=args.dtype,
-        img_history_size=args.img_history_size,
-        img_history_interval=args.img_history_interval,
-    )
+    policy = RemoteLiberoPolicy(args.policy_endpoint, timeout_s=args.policy_timeout_s)
     suite = benchmark_dict[args.task_suite_name]()
     if variant == "plus":
         task_ids = task_ids_for_plus(args, suite, package_root)
@@ -257,7 +237,7 @@ def evaluate(variant: str, argv: list[str] | None = None) -> float:
             log.flush()
 
         emit(f"variant={variant} suite={args.task_suite_name} tasks={len(task_ids)}")
-        emit(f"checkpoint={args.checkpoint} norm_path={args.norm_path or '<checkpoint>/norm_stats.pkl'}")
+        emit(f"policy_endpoint={args.policy_endpoint}")
         for task_id in task_ids:
             task = suite.get_task(task_id)
             env = make_env(task, OffScreenRenderEnv, get_libero_path, args.env_img_res)
@@ -289,6 +269,7 @@ def evaluate(variant: str, argv: list[str] | None = None) -> float:
         rate = successes / total if total else 0.0
         emit(f"final_success_rate={rate:.6f} successes={successes} episodes={total}")
         emit(f"log={log_path}")
+    policy.close()
     return rate
 
 

@@ -26,7 +26,7 @@ DEFAULTS = {
     "model": "hy_a3b",
     "max-turns": 100,
     "max-tokens": 8192,
-    "max-episode-steps": 600,
+    "max-episode-steps": 10000,
 }
 
 INT_FIELDS = {

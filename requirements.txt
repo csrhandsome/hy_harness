@@ -21,7 +21,7 @@ numpy>=1.24,<2.0
 # transformers: HunYuanVL-MoT classes are provided by the in-repo vendor
 # copy at ``hy_vla/hunyuan_vl_mot/`` (idempotent Auto* registration).
 # Set ``>=4.57`` as a safe lower bound.
-transformers>=4.57
+transformers>=4.57.1,<5
 safetensors>=0.4
 huggingface-hub>=0.23
 

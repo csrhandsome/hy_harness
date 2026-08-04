@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla-protocol"
+version = "0.1.0"
+description = "Lightweight ndarray-aware RPC protocol for Hy-VLA policy services"
+requires-python = ">=3.10,<3.13"
+dependencies = ["numpy>=1.24"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

@@ -10,6 +10,13 @@
 # instruction_type, video_out_save_dir, ...) are NOT in this file -- they
 # live in RoboTwin's own task yml and CLI overrides.
 
+# --- Remote policy server -------------------------------------------------
+# Start the root-environment policy server with --benchmark robotwin first.
+policy_endpoint: http://127.0.0.1:8001
+policy_timeout_s: 120
+
+# The fields below configure that server and are retained here as launch
+# documentation; the RoboTwin process itself does not load these weights.
 # --- Checkpoint -----------------------------------------------------------
 # HuggingFace repo id or local directory containing config.json +
 # model.safetensors + norm_stats.pkl. When norm_path is null the wrapper

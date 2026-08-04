@@ -110,8 +110,8 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
                              "(protocol=http|socket, defaults to http). "
                              "If unset and SAM3_CHECKPOINT_PATH is set, a local "
                              "SAM3 server is spawned; otherwise SAM3 is skipped.")
-    parser.add_argument("--cuda-device", default=None,
-                        help="GPU device(s) to expose via CUDA_VISIBLE_DEVICES.")
+    parser.add_argument("--cuda-device", type=int, default=None,
+                        help="GPU device to pin LIBERO rendering/inference to.")
 
 
 def _parse_config(args: argparse.Namespace) -> RunConfig:
@@ -176,15 +176,22 @@ def _parse_endpoint(endpoint: str) -> tuple[str, str, int]:
     return protocol, host, int(port)
 
 
-def _subprocess_env(cuda_device: str | None, **extra: str) -> dict[str, str]:
-    """Build the env dict for a subprocess: inherit from parent, apply
-    ``--cuda-device`` uniformly, layer optional extras on top.
+def _subprocess_env(
+    cuda_device: int | None,
+    *,
+    clear_cuda_visible: bool = False,
+    **extra: str,
+) -> dict[str, str]:
+    """Build a subprocess environment with optional CUDA pinning.
 
-    If ``cuda_device`` is None, ``CUDA_VISIBLE_DEVICES`` is left as inherited
-    (respecting whatever the parent shell set). If given, it wins.
+    Native LIBERO clears CUDA_VISIBLE_DEVICES and resolves its global CUDA
+    ordinal to the matching EGL device in env_server. VLA/SAM3 retain the
+    usual visibility-based isolation.
     """
     env = os.environ.copy()
-    if cuda_device is not None:
+    if clear_cuda_visible and cuda_device is not None:
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+    elif cuda_device is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
     env.update(extra)
     return env
@@ -223,12 +230,34 @@ def _init_runtime(
     adapter_root = str(get_vla_adapter_root())
     harness_root = str(get_repo_root())
 
-    def _pythonpath_env(**extra: str) -> dict[str, str]:
+    def _pythonpath_env(
+        *, clear_cuda_visible: bool = False, **extra: str
+    ) -> dict[str, str]:
         """Ensure subprocesses can import ``rpent``, ``robots``, and VLA-Adapter."""
         merged = os.pathsep.join(
             p for p in (harness_root, adapter_root, os.environ.get("PYTHONPATH", "")) if p
         )
-        return _subprocess_env(args.cuda_device, PYTHONPATH=merged, **extra)
+        return _subprocess_env(
+            args.cuda_device,
+            clear_cuda_visible=clear_cuda_visible,
+            PYTHONPATH=merged,
+            **extra,
+        )
+
+    cuda_args = (
+        ["--cuda-device", str(args.cuda_device)]
+        if args.cuda_device is not None
+        else []
+    )
+
+    libero_python = os.environ.get("LIBERO_PYTHON")
+    if not libero_python:
+        libero_python = str(Path(adapter_root) / "libero_eval" / ".venv" / "bin" / "python")
+    if not Path(libero_python).is_file():
+        raise RuntimeError(
+            f"LIBERO interpreter not found: {libero_python}. "
+            "Run `uv sync --project libero_eval` or set LIBERO_PYTHON."
+        )
 
     # --- env_server --------------------------------------------------------
     if args.env_endpoint is None:
@@ -236,7 +265,7 @@ def _init_runtime(
         env_daemon = ProcessDaemon(
             name="env_server",
             cmd=[
-                sys.executable,
+                libero_python,
                 str(get_repo_root() / "robots" / "libero" / "env_server.py"),
                 "--suite", args.suite,
                 "--task", str(args.task),
@@ -246,8 +275,10 @@ def _init_runtime(
                 "--transport", "http",
                 "--host", host,
                 "--port", str(port),
+                *cuda_args,
             ],
             env=_pythonpath_env(
+                clear_cuda_visible=True,
                 LIBERO_TYPE=libero_type,
                 MUJOCO_GL="egl",
                 ROBOT_PLATFORM="LIBERO",
@@ -259,7 +290,7 @@ def _init_runtime(
         env_daemon.start()
         daemons.append(env_daemon)
         env_client: RpcClient = HttpRpcClient(f"http://{host}:{port}")
-        wait_for_ready(env_client)
+        wait_for_ready(env_client, daemon=env_daemon)
     else:
         protocol, host, port = _parse_endpoint(args.env_endpoint)
         if protocol == "socket":
@@ -307,7 +338,7 @@ def _init_runtime(
         daemons.append(vla_daemon)
         vla_rpc: RpcClient = HttpRpcClient(f"http://{host}:{port}")
         # Adapter checkpoint load can exceed the default 300s on cold start.
-        wait_for_ready(vla_rpc, timeout_s=600.0)
+        wait_for_ready(vla_rpc, timeout_s=600.0, daemon=vla_daemon)
     else:
         protocol, host, port = _parse_endpoint(args.vla_endpoint)
         if protocol == "socket":
@@ -360,7 +391,7 @@ def _init_runtime(
         sam3_daemon.start()
         daemons.append(sam3_daemon)
         sam3_rpc = HttpRpcClient(f"http://{host}:{port}")
-        wait_for_ready(sam3_rpc)
+        wait_for_ready(sam3_rpc, daemon=sam3_daemon)
         sam3_client = Sam3Client(sam3_rpc)
     else:
         _log.warning(

@@ -17,5 +17,6 @@ runtime_options:
   enforce_eager: true
   reasoning_parser: hunyuan_v3
   tool_call_parser: hy_v3
+  enable_auto_tool_choice: true
   limit_mm_per_prompt: '{"image":128,"video":0}'
   chat_template: chat_template.jinja

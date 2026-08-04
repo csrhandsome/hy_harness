@@ -134,6 +134,32 @@ export CODEBUDDY_MODEL=hy_a3b
 
 `.env.local` 只保存本机配置和密钥，不要提交到 Git。
 
+### 5.1 独立仿真环境与动作模型服务
+
+LIBERO 不再安装到根环境。创建独立仿真环境：
+
+```bash
+uv sync --project libero_eval
+```
+
+直接评测前，在根环境启动动作 Policy Server：
+
+```bash
+uv run --extra harness vla-policy-server \
+  --benchmark libero \
+  --checkpoint /absolute/path/to/hy-vla-libero \
+  --port 8001
+```
+
+然后在另一个终端运行：
+
+```bash
+POLICY_ENDPOINT=http://127.0.0.1:8001 \
+  bash libero_eval/run_libero_eval.sh
+```
+
+RoboTwin 也通过各自的轻量 client 请求根环境 Policy Server。完整环境边界、RoboTwin 命令和并发限制见 `docs/environment-layout.md`。
+
 ## 6. 配置 Serving/vLLM 环境
 
 `serving` 使用独立的虚拟环境，因为它的 PyTorch 和 vLLM 版本与根目录环境不同。
@@ -207,6 +233,7 @@ CODEBUDDY_MODEL=hy_a3b
 [ ] third_party/LIBERO-PRO 已存在且已下载 BDDL/init 文件
 [ ] sde_harness/resources/libero 已存在（Harness memory）
 [ ] 根目录已执行 uv sync --extra harness
+[ ] libero_eval 已执行 uv sync --project libero_eval
 [ ] serving/ 已执行 uv sync
 [ ] vLLM 权重已下载并且服务端口可访问
 ```
@@ -217,6 +244,7 @@ CODEBUDDY_MODEL=hy_a3b
 hy_harness/
 ├── .venv/                         # 根目录 Harness 环境，由 uv 管理
 ├── third_party/                   # Benchmark 代码和资源（Git ignored）
+├── libero_eval/.venv/              # 独立 LIBERO 仿真环境
 ├── sde_harness/resources/         # Harness memory 资源（Git ignored）
 ├── serving/cache/                 # vLLM 权重缓存（Git ignored）
 └── serving/.venv/                 # 独立 vLLM 环境，由 uv 管理
