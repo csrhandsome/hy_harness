@@ -1,58 +1,85 @@
 # Environment and policy-server layout
 
-The repository uses three dependency boundaries. Simulator environments are a
-logical group, but each benchmark keeps its own physical virtual environment so
-MuJoCo, SAPIEN, Gym, and related pins cannot collide.
+The repository has one model-serving environment and one Harness environment per
+simulator. Hy-VLA weights are never loaded by a simulator process.
 
 | Environment | Location | Owns |
 | --- | --- | --- |
-| Hy-VLA + Harness | `.venv/` | training/inference stack, RPent planners, action Policy Server |
-| LIBERO simulator | `libero_eval/.venv/` | LIBERO, robosuite, MuJoCo, lightweight policy client |
-| RoboTwin simulator | the upstream RoboTwin environment | RoboTwin/SAPIEN and lightweight policy client |
+| Hy-VLA | `.venv/` | training, local inference, and the action Policy Server |
+| LIBERO + Harness | `libero_eval/.venv/` | LIBERO/robosuite/MuJoCo, RPent Planner, and the lightweight policy client |
+| RoboTwin + Harness | `robotwin_eval/.venv/` | RoboTwin/SAPIEN, RPent Planner, and the lightweight policy client |
+| RoboDojo + Harness | `robodojo_eval/.venv/` | RoboDojo, RPent Planner, and the lightweight policy client |
 | Planner VLM serving | `serving/.venv/` | vLLM, its plugin, and OpenAI-compatible VLM serving |
 
 ## Create or refresh environments
 
-From the repository root:
+From this repository root:
 
 ```bash
-uv sync --extra harness
+# Training, local inference, and vla-policy-server only.
+uv sync
+
+# LIBERO simulator and its Harness/Planner dependencies.
 uv sync --project libero_eval
+
+# Planner VLM service.
 uv sync --project serving
 ```
 
-The root workspace contains `sde_harness` and `packages/vla_protocol`; Harness
-does not create a second environment. `libero_eval` and `serving` are explicitly
-excluded from that workspace and therefore materialize their own `.venv`.
-
-## Direct LIBERO evaluation
-
-Start the action model in the root environment:
+`robotwin_eval/pyproject.toml` and `robodojo_eval/pyproject.toml` own the
+Harness-side dependencies for their respective simulators. Create or refresh
+those environments through the corresponding manifest:
 
 ```bash
-uv run --extra harness vla-policy-server \
+uv sync --project robotwin_eval
+uv sync --project robodojo_eval
+```
+
+The simulator's upstream dependencies remain declared in those manifests.
+
+## Root action Policy Server
+
+Start the benchmark-specific server from the root environment. It loads the
+checkpoint once and is the only process that imports Hy-VLA and Torch for
+inference.
+
+```bash
+uv run vla-policy-server \
   --benchmark libero \
   --checkpoint /absolute/path/to/hy-vla-libero \
   --port 8001
 ```
 
-In another shell, run the simulator-only evaluator:
+The default endpoint is `http://127.0.0.1:8001`. Start one server per
+concurrent stateful evaluation worker; do not share one server between
+concurrent episodes.
+
+## LIBERO
+
+For direct evaluation, the simulator sends observations to the root server:
 
 ```bash
 POLICY_ENDPOINT=http://127.0.0.1:8001 \
-  bash libero_eval/run_libero_eval.sh
+  bash libero_eval/eval.sh --pro
 ```
 
-The same server works with the Plus and Pro launchers when the checkpoint is
-compatible. The benchmark process sends lossless uint8 arrays and state vectors
-over the local RPC protocol; it does not import Torch or `hy_vla`.
-
-## Direct RoboTwin evaluation
-
-Start one action server per concurrently evaluated GPU/worker:
+For a Harness run, start the same root server first, then run the Planner in
+the LIBERO environment:
 
 ```bash
-uv run --extra harness vla-policy-server \
+POLICY_ENDPOINT=http://127.0.0.1:8001 \
+  bash libero_eval/eval.sh --pro --harness
+```
+
+The Harness launcher passes `POLICY_ENDPOINT` to `--vla-endpoint`; it no longer
+spawns a VLA model inside `libero_eval/.venv`.
+
+## RoboTwin
+
+Start one root server per worker:
+
+```bash
+uv run vla-policy-server \
   --benchmark robotwin \
   --checkpoint /absolute/path/to/hy-vla-robotwin \
   --norm-path /absolute/path/to/norm_stats.pkl \
@@ -63,42 +90,25 @@ uv run --extra harness vla-policy-server \
   --port 8001
 ```
 
-Then launch RoboTwin in its own environment with `POLICY_ENDPOINT` set. The
-policy symlink imports `robotwin_eval.remote_policy`; model weights, Torch, and
-normalization remain on the server side.
+Launch RoboTwin in its own environment with `POLICY_ENDPOINT` set. The policy
+symlink imports only the remote client. Enable its optional embedded Harness
+only after installing `sde-harness` into the RoboTwin environment.
 
-The server deliberately protects its stateful image history and action cache
-from interleaved sessions. A multi-GPU RoboTwin run must use one server and port
-per worker rather than sharing one server across simultaneous episodes.
+## RoboDojo
 
-## Harness evaluation
-
-The LIBERO Harness launcher remains a single command:
-
-```bash
-CKPT_PATH=/absolute/path/to/hy-vla-libero \
-  bash libero_eval/run_libero_pro_eval_harness.sh
-```
-
-The launcher runs the Planner and model process with the root `.venv`; the
-LIBERO environment server is spawned with `libero_eval/.venv/bin/python`.
-Override that interpreter with `LIBERO_PYTHON` when needed.
-
-The historical embedded RoboTwin Harness still runs in the RoboTwin process and
-is not part of the isolated direct-evaluation path. Fully isolating that
-experimental mode requires turning the live `TASK_ENV` object into a benchmark
-RPC service; leave `harness.enabled: false` for the separated setup.
+`robodojo_eval/pyproject.toml` owns RoboDojo's Harness dependencies. The
+existing RoboDojo policy flow is unchanged; configure and launch it through
+`robodojo_eval/deploy_policy.yml` and `robodojo_eval/eval.sh`.
 
 ## Planner VLM serving
 
-`serving/.venv` is unrelated to the action Policy Server. It owns the vLLM model
-used by Harness planners:
+`serving/.venv` is independent of the action Policy Server. It owns the vLLM
+model used by Harness planners:
 
 ```bash
 bash serving/scripts/verify_flow.sh
 bash serving/scripts/serve.sh --model hy-embodied-vlm-1.0
 ```
 
-By default the action Policy Server uses port 8001 and planner VLM serving uses
-port 8080, which makes the two roles explicit.
-
+By default the action Policy Server uses port 8001 and Planner VLM serving uses
+port 8080.

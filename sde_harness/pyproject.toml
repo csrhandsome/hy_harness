@@ -27,4 +27,4 @@ exclude = ["tests*", "docs*", "scripts*", "resources*"]
 [tool.uv]
 package = true
 [tool.uv.sources]
-vla-protocol = { workspace = true }
+vla-protocol = { path = "../packages/vla_protocol", editable = true }

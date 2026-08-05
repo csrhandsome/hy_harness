@@ -54,7 +54,7 @@ def configure_libero(variant: str):
     if not package_root.is_dir():
         raise FileNotFoundError(f"{variant} LIBERO package missing: {package_root}")
     config_name = ".libero_config" if variant == "standard" else f".libero_{variant}_config"
-    config_dir = EVAL_ROOT / config_name
+    config_dir = EVAL_ROOT / "configs" / config_name
     config_dir.mkdir(parents=True, exist_ok=True)
     config = {
         "benchmark_root": str(package_root),
@@ -90,7 +90,7 @@ def resolve_pro_suite(requested: str, benchmark_dict: dict[str, Any], config_pat
     if target not in benchmark_dict:
         raise FileNotFoundError(
             f"prebuilt LIBERO-Pro suite {target!r} is missing. Run "
-            "bash libero_eval/download_libero_pro.sh first."
+            "bash libero_eval/download.sh pro first."
         )
     return target
 
@@ -188,7 +188,7 @@ def build_parser(variant: str) -> argparse.ArgumentParser:
     parser.add_argument("--max-tasks", "--max_tasks", type=int, default=0)
     parser.add_argument("--start-task-id", "--start_task_id", type=int, default=0)
     parser.add_argument("--perturbation-category", "--perturbation_category", default="")
-    parser.add_argument("--evaluation-config-path", "--evaluation_config_path", default=str(EVAL_ROOT / "libero_pro_evaluation_config.yaml"))
+    parser.add_argument("--evaluation-config-path", "--evaluation_config_path", default=str(EVAL_ROOT / "configs" / "libero_pro_evaluation_config.yaml"))
     parser.add_argument("--local-log-dir", default=str(REPO_ROOT / "eval_logs" / "libero"))
     parser.add_argument("--save-videos", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--seed", type=int, default=7)
@@ -273,8 +273,18 @@ def evaluate(variant: str, argv: list[str] | None = None) -> float:
     return rate
 
 
-def main(variant: str) -> None:
-    evaluate(variant)
+def main(variant: str | None = None, argv: list[str] | None = None) -> None:
+    """Run an evaluator selected by the shell launcher or command line."""
+    if variant is None:
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--variant", choices=("standard", "plus", "pro"), default="standard")
+        selection, argv = parser.parse_known_args(argv)
+        variant = selection.variant
+    evaluate(variant, argv)
 
 
 __all__ = ["evaluate", "main"]
+
+
+if __name__ == "__main__":
+    main()

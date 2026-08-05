@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Download RPent text memory + seed-0 recipes (not model weights) via hf-mirror.
+# Download RPent text memory + seed-0 recipes for the Harness via hf-mirror.
 #
 # Usage:
-#   bash vla-scripts/download_rpent_memory.sh
-#   HF_ENDPOINT=https://huggingface.co bash vla-scripts/download_rpent_memory.sh
+#   bash sde_harness/scripts/download_rpent_memory.sh
+#   HF_ENDPOINT=https://huggingface.co bash sde_harness/scripts/download_rpent_memory.sh
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEST="${DEST:-${ROOT_DIR}/sde_harness/resources}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
 if [[ "${MAX_WORKERS}" -gt 4 ]]; then

@@ -1,30 +1,31 @@
 # SDE Harness for Hy-VLA
 
-`sde_harness` is a member of the root uv workspace. It shares the repository
-root `.venv` and does not own a second environment:
+`sde_harness` is a shared package. It is installed into the virtual environment
+of the simulator that runs it, rather than into the root Hy-VLA environment.
+
+- LIBERO: `uv sync --project libero_eval` installs it into `libero_eval/.venv`.
+- RoboTwin: `uv sync --project robotwin_eval` installs it into the RoboTwin evaluation environment.
+- RoboDojo: `uv sync --project robodojo_eval` installs it into the RoboDojo evaluation environment.
+
+The root `.venv` owns Hy-VLA training, inference, and `vla-policy-server`.
+Start the Policy Server before a Harness run:
 
 ```bash
-uv sync --extra harness
+uv run vla-policy-server \
+  --benchmark libero \
+  --checkpoint /path/to/hy-vla-libero \
+  --port 8001
 ```
 
-Simulator dependencies are intentionally absent from this package. Create the
-LIBERO environment separately:
+Then launch LIBERO Harness from its own environment:
 
 ```bash
-uv sync --project libero_eval
-```
-
-Run through the stable wrappers:
-
-```bash
-CKPT_PATH=/path/to/hy-vla-libero \
+POLICY_ENDPOINT=http://127.0.0.1:8001 \
 TASK_SUITE=libero_spatial_swap TASK=0 SEED=0 \
 PLANNER=codebuddy MODEL=hy_a3b \
-  bash libero_eval/run_libero_pro_eval_harness.sh
+  bash libero_eval/eval.sh --pro --harness
 ```
 
-The wrapper starts the LIBERO environment server with
-`libero_eval/.venv/bin/python`, while the Planner and VLA model process use the
-root interpreter. `LIBERO_PYTHON` can select another compatible simulator
-environment. Planner VLM serving remains the separate service under
-`serving/`; see `docs/environment-layout.md`.
+The Harness connects to that endpoint; it does not spawn or load a VLA model.
+Planner VLM serving remains the separate service under `serving/`; see
+`docs/environment-layout.md`.

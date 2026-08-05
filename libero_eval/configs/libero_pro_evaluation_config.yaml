@@ -1,5 +1,5 @@
 # LIBERO-Pro perturbation settings (benchmark ≠ VLA-Adapter Pro weights).
-# Paths are rewritten to absolute paths by run_libero_pro_eval.py.
+# Paths are rewritten to absolute paths by runner.py.
 
 bddl_files_path: "third_party/LIBERO-PRO/libero/libero/bddl_files"
 script_path: "third_party/LIBERO-PRO/notebooks/generate_init_states.py"

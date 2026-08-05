@@ -1,0 +1,17 @@
+[project]
+name = "hy-vla-robodojo-eval"
+version = "0.1.0"
+description = "RoboDojo-side runtime for the Hy-VLA remote policy and Harness"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=1.24,<2.0",
+    "sde-harness",
+    "vla-protocol",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+sde-harness = { path = "../sde_harness", editable = true }
+vla-protocol = { path = "../packages/vla_protocol", editable = true }

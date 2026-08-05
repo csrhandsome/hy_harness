@@ -96,7 +96,7 @@ def get_libero_root(libero_type: str | None = None) -> Path:
 
 def get_libero_config_dir(libero_type: str | None = None) -> Path:
     kind = (libero_type or get_libero_type()).lower()
-    root = get_hy_vla_root() / "libero_eval"
+    root = get_hy_vla_root() / "libero_eval" / "configs"
     mapping = {
         "standard": root / ".libero_config",
         "pro": root / ".libero_pro_config",

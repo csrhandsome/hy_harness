@@ -77,9 +77,6 @@ dependencies = [
     "vla-protocol",
 ]
 
-[project.optional-dependencies]
-harness = ["sde-harness"]
-
 [project.scripts]
 vla-policy-server = "hy_vla.policy_server.cli:main"
 
@@ -113,8 +110,8 @@ override-dependencies = [
 ]
 
 [tool.uv.workspace]
-members = ["sde_harness", "packages/vla_protocol"]
-exclude = ["libero_eval", "serving"]
+members = ["packages/vla_protocol"]
+exclude = ["libero_eval", "robotwin_eval", "robodojo_eval", "serving", "sde_harness"]
 
 # ---- PyTorch CUDA wheel selection ------------------------------------------
 # uv lets us register a package index and route a single requirement
@@ -140,7 +137,6 @@ flash-attn = [
 ]
 
 vla-protocol = { workspace = true }
-sde-harness = { workspace = true }
 
 # =============================================================================
 # Hatch — tells hatch which package directories to ship in the wheel

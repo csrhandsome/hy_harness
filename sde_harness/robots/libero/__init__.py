@@ -102,9 +102,8 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
                              "(protocol=http|socket, defaults to http). "
                              "If unset, a local env_server is spawned.")
     parser.add_argument("--vla-endpoint", default=None,
-                        help="[protocol://]host:port of an existing vla_server "
-                             "(protocol=http|socket, defaults to http). "
-                             "If unset, a local vla_server is spawned.")
+                        help="[protocol://]host:port of the root Policy Server "
+                             "(defaults to POLICY_ENDPOINT; protocol=http|socket).")
     parser.add_argument("--sam3-endpoint", default=None,
                         help="[protocol://]host:port of an existing SAM3 server "
                              "(protocol=http|socket, defaults to http). "
@@ -228,7 +227,14 @@ def _init_runtime(
     adapter_ckpt = args.adapter_checkpoint or get_adapter_checkpoint_path()
     unnorm_key = args.unnorm_key or _base_suite_name(args.suite)
     adapter_root = str(get_vla_adapter_root())
+    vla_endpoint = args.vla_endpoint or os.environ.get("POLICY_ENDPOINT")
+    if not vla_endpoint:
+        raise RuntimeError(
+            "Set POLICY_ENDPOINT or --vla-endpoint to a root vla-policy-server; "
+            "the LIBERO Harness environment does not load Hy-VLA weights."
+        )
     harness_root = str(get_repo_root())
+    args.vla_endpoint = vla_endpoint
 
     def _pythonpath_env(
         *, clear_cuda_visible: bool = False, **extra: str
