@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .prompt_bundle import system_prompt, user_prompt
 from .toolkit import RobotTwinEnvAdapter, RobotTwinToolkit
@@ -108,17 +109,29 @@ class RobotTwinHarnessPolicy:
             parents=True, exist_ok=True
         )
 
+        # Environment variables are explicit per-run launcher overrides. Read
+        # them before YAML defaults so a smoke test can be tuned without
+        # editing deploy_policy.yml.
         planner_type = str(
-            self.config.get("planner")
-            or os.environ.get("ROBOTWIN_HARNESS_PLANNER", "codebuddy")
+            os.environ.get("ROBOTWIN_HARNESS_PLANNER")
+            or self.config.get("planner")
+            or "codebuddy"
         )
-        model = self.config.get("model") or os.environ.get("ROBOTWIN_HARNESS_MODEL")
-        base_url = self.config.get("base_url") or os.environ.get(
-            "ROBOTWIN_HARNESS_BASE_URL"
+        model = os.environ.get("ROBOTWIN_HARNESS_MODEL") or self.config.get("model")
+        base_url = os.environ.get("ROBOTWIN_HARNESS_BASE_URL") or self.config.get(
+            "base_url"
         )
-        max_turns = int(self.config.get("max_turns", 100))
-        max_tokens = int(self.config.get("max_tokens", 8192))
-        timeout_value = self.config.get("planner_timeout_s")
+        max_turns = int(
+            os.environ.get("ROBOTWIN_HARNESS_MAX_TURNS")
+            or self.config.get("max_turns", 100)
+        )
+        max_tokens = int(
+            os.environ.get("ROBOTWIN_HARNESS_MAX_TOKENS")
+            or self.config.get("max_tokens", 8192)
+        )
+        timeout_value = os.environ.get("ROBOTWIN_HARNESS_TIMEOUT_S")
+        if timeout_value in (None, ""):
+            timeout_value = self.config.get("planner_timeout_s")
         planner_timeout_s = None if timeout_value in (None, "") else int(timeout_value)
         planner = build_planner(
             planner_type,

@@ -65,3 +65,9 @@ _tmp_*.sh
 
 # third party
 third_party/
+
+# models
+models/
+
+# docs
+docs/

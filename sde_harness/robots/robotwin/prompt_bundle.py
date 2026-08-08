@@ -12,14 +12,17 @@ def system_prompt() -> PromptNode:
             "RoboTwin bimanual task."
         ),
         "OBSERVATION": (
-            "Use robotwin_observe to inspect the current instruction, state, "
-            "and all three camera views. Do not infer that an action succeeded "
-            "without observing the resulting scene."
+            "At episode start, call robotwin_observe exactly once to inspect "
+            "the current instruction, state, and all three camera views. Do "
+            "not merely describe a call: emit an actual tool call. Do not "
+            "repeat robotwin_observe without first changing the scene."
         ),
         "ACTION": (
-            "Prefer robotwin_vla_step for closed-loop Hy-VLA control. Use "
-            "robotwin_execute_ee only for a deliberate 16-value absolute "
-            "dual-arm EE correction. RoboTwin action quaternions use wxyz."
+            "Immediately after the initial observation, call "
+            "robotwin_vla_step for closed-loop Hy-VLA control. Prefer it for "
+            "physical manipulation; use robotwin_execute_ee only for a "
+            "deliberate 16-value absolute dual-arm EE correction. RoboTwin "
+            "action quaternions use wxyz."
         ),
         "WORKFLOW": (
             "Observe, choose a small action budget, execute, observe again, "

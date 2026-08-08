@@ -142,15 +142,14 @@ class CodeBuddyPlanner:
 
             try:
                 if input_queue is None:
-
-                    async def consume_stream() -> None:
-                        async for message in sdk.query(prompt=prompt, options=options):
-                            _emit(message)
-                            if recorder.finish_result is not None:
-                                logger.info("FINISH called: %s", recorder.finish_result)
-                                break
-
-                    await asyncio.wait_for(consume_stream(), timeout=self._timeout_s)
+                    await self._run_one_shot(
+                        sdk,
+                        prompt,
+                        options,
+                        recorder,
+                        timeout_s=self._timeout_s,
+                        emit=_emit,
+                    )
                 else:
                     await self._run_interactive(
                         sdk,
@@ -199,6 +198,63 @@ class CodeBuddyPlanner:
             },
             error=error,
         )
+
+    async def _run_one_shot(
+        self,
+        sdk: Any,
+        prompt: str,
+        options: Any,
+        recorder: "_Recorder",
+        *,
+        timeout_s: int,
+        emit,
+    ) -> None:
+        """Run one SDK session without cancelling its async generator directly.
+
+        ``sdk.query()`` owns an AnyIO task group. Cancelling the task that is
+        iterating that async generator can make older SDK releases close the
+        group from an async-generator-finalizer task, producing:
+        ``Attempted to exit cancel scope in a different task``. Use the
+        stateful client API instead so timeout handling can interrupt and drain
+        the same session before its context manager disconnects it.
+        """
+        async with sdk.CodeBuddySDKClient(options=options) as client:
+            await client.query(prompt)
+
+            async def consume_response() -> None:
+                async for message in client.receive_response():
+                    emit(message)
+                    if recorder.finish_result is not None:
+                        logger.info("FINISH called: %s", recorder.finish_result)
+                        with contextlib.suppress(Exception):
+                            await client.interrupt()
+                        return
+
+            consumer = asyncio.create_task(consume_response())
+            done, _ = await asyncio.wait({consumer}, timeout=timeout_s)
+            if consumer in done:
+                # Propagate an SDK/CLI failure before the context manager
+                # disconnects the session.
+                consumer.result()
+                return
+
+            # Do not use asyncio.wait_for() here: it cancels the task that is
+            # directly iterating the SDK stream. Instead, ask the CLI to stop
+            # through its protocol and give that same stream a short chance to
+            # finish normally.
+            with contextlib.suppress(Exception):
+                await client.interrupt()
+            done, _ = await asyncio.wait({consumer}, timeout=10)
+            if consumer in done:
+                consumer.result()
+
+            if not consumer.done():
+                consumer.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await consumer
+
+            # The caller formats this as the normal planner timeout error.
+            raise asyncio.TimeoutError
 
     async def _run_interactive(
         self,
@@ -264,7 +320,14 @@ class CodeBuddyPlanner:
             add_mcp_prefix(str(spec["name"])) for spec in toolkit.get_tools_spec()
         )
 
-        env: dict[str, str] = {}
+        # The bundled headless CLI and the local OpenAI-compatible endpoint
+        # exchange arbitrary Unicode. Keep the subprocess on UTF-8 even when
+        # a batch launcher inherited ``LANG=C`` / an ASCII-compatible locale.
+        env: dict[str, str] = {
+            "PYTHONUTF8": "1",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
         if self._api_key:
             env["CODEBUDDY_API_KEY"] = self._api_key
         for key in (
