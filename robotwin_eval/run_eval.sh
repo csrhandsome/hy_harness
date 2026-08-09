@@ -38,7 +38,6 @@ HARNESS_ENABLED="${HARNESS_ENABLED:-1}"
 HARNESS_PLANNER="${HARNESS_PLANNER:-codebuddy}"
 HARNESS_MODEL="${HARNESS_MODEL:-hy_a3b}"
 HARNESS_MAX_TURNS="${HARNESS_MAX_TURNS:-100}"
-HARNESS_MAX_TOKENS="${HARNESS_MAX_TOKENS:-8192}"
 HARNESS_TIMEOUT_S="${HARNESS_TIMEOUT_S:-1200}"
 
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/tmp/hy-harness-robotwin-venv}"
@@ -203,7 +202,6 @@ run_worker() {
       ROBOTWIN_HARNESS_PLANNER="${HARNESS_PLANNER}" \
       ROBOTWIN_HARNESS_MODEL="${HARNESS_MODEL}" \
       ROBOTWIN_HARNESS_MAX_TURNS="${HARNESS_MAX_TURNS}" \
-      ROBOTWIN_HARNESS_MAX_TOKENS="${HARNESS_MAX_TOKENS}" \
       ROBOTWIN_HARNESS_TIMEOUT_S="${HARNESS_TIMEOUT_S}" \
       CODEBUDDY_TIMEOUT_S="${HARNESS_TIMEOUT_S}" \
       PYTHONUTF8="${PYTHONUTF8}" \
@@ -227,7 +225,6 @@ run_worker() {
             --harness.planner "${HARNESS_PLANNER}" \
             --harness.model "${HARNESS_MODEL}" \
             --harness.max_turns "${HARNESS_MAX_TURNS}" \
-            --harness.max_tokens "${HARNESS_MAX_TOKENS}" \
             --harness.planner_timeout_s "${HARNESS_TIMEOUT_S}"
     ) > "${log}" 2>&1; then
       echo "[gpu${gpu}] done  ${task}"

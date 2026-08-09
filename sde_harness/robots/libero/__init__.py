@@ -8,32 +8,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from robots.libero.prompt_bundle import (
-    system_prompt,
-    user_prompt,
-)
-from rpent.envs.env_spec import EnvSpec, RunConfig
-from rpent.envs.prompt_bundle import PromptBundle
-from rpent.utils.config import get_repo_root
+from hy_harness.envs.env_spec import EnvSpec, RunConfig
+from hy_harness.utils.config import get_repo_root
 
 if TYPE_CHECKING:
-    from rpent.dashboard.state import State
-    from rpent.utils.daemon import ProcessDaemon
-    from rpent.utils.rpc import RpcClient
+    from hy_harness.dashboard.state import State
+    from hy_harness.utils.daemon import ProcessDaemon
+    from hy_harness.utils.rpc import RpcClient
 
 
 def get_env_spec() -> EnvSpec:
-    """Return the LIBERO env identity, prompt bundle, and runner hooks.
+    """Return the LIBERO env identity and runner hooks.
 
     Tool schemas, handlers, server lifecycle, and the MCP allowlist live on
     the LIBERO toolkit (see :func:`get_toolkit`).
     """
     return EnvSpec(
         name="libero",
-        prompts=PromptBundle(
-            system=system_prompt,
-            user=user_prompt,
-        ),
         add_cli_args=_add_cli_args,
         parse_config=_parse_config,
         init_runtime=_init_runtime,
@@ -141,7 +132,7 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
 
     dashboard_state = None
     if getattr(args, "dashboard", False):
-        from rpent.dashboard.state import State
+        from hy_harness.dashboard.state import State
         dashboard_state = State(
             run_id=f"{args.suite}/{output_dir.name}",
             name=recipe_tag,
@@ -210,17 +201,17 @@ def _init_runtime(
     ``get_toolkit``) doesn't drag them in.
     """
     from robots.libero.env_client import LiberoEnvClient
-    from rpent.utils.config import (
+    from hy_harness.utils.config import (
         get_adapter_checkpoint_path,
         get_libero_type,
         get_vla_adapter_root,
     )
-    from rpent.utils.daemon import ProcessDaemon, pick_free_port
-    from rpent.utils.http_rpc import HttpRpcClient
-    from rpent.utils.rpc import wait_for_ready
-    from rpent.utils.sam3_client import Sam3Client
-    from rpent.utils.socket_rpc import SocketRpcClient
-    from rpent.utils.vla_client import VLAClient
+    from hy_harness.utils.daemon import ProcessDaemon, pick_free_port
+    from hy_harness.utils.http_rpc import HttpRpcClient
+    from hy_harness.utils.rpc import wait_for_ready
+    from hy_harness.utils.sam3_client import Sam3Client
+    from hy_harness.utils.socket_rpc import SocketRpcClient
+    from hy_harness.utils.vla_client import VLAClient
 
     daemons: list[ProcessDaemon] = []
     libero_type = args.libero_type or get_libero_type()
@@ -239,7 +230,7 @@ def _init_runtime(
     def _pythonpath_env(
         *, clear_cuda_visible: bool = False, **extra: str
     ) -> dict[str, str]:
-        """Ensure subprocesses can import ``rpent``, ``robots``, and VLA-Adapter."""
+        """Ensure subprocesses can import ``hy_harness``, ``robots``, and VLA-Adapter."""
         merged = os.pathsep.join(
             p for p in (harness_root, adapter_root, os.environ.get("PYTHONPATH", "")) if p
         )
@@ -359,7 +350,7 @@ def _init_runtime(
     # --- sam3_server (optional) --------------------------------------------
     # Skip when neither an endpoint nor SAM3_CHECKPOINT_PATH is provided so
     # 8GB laptops can run VLA-only without loading SAM3 (~10GB+).
-    from rpent.utils.logging import get_logger
+    from hy_harness.utils.logging import get_logger
 
     _log = get_logger("libero")
     sam3_ckpt = (os.environ.get("SAM3_CHECKPOINT_PATH") or "").strip()

@@ -52,7 +52,6 @@ harness:
   planner: codebuddy
   model: hy_a3b
   max_turns: 100
-  max_tokens: 8192
-  # Optional timeout for cursor/code-oriented planners (seconds).
+  # Optional CodeBuddy planner timeout (seconds).
   # planner_timeout_s: 1200
   # output_dir: logs/robotwin_harness

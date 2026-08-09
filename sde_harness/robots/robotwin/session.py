@@ -1,4 +1,4 @@
-"""Embedded RPent Planner session for the official RoboTwin runner."""
+"""Embedded HyHarness Planner session for the official RoboTwin runner."""
 
 from __future__ import annotations
 
@@ -10,8 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .prompt_bundle import system_prompt, user_prompt
-from .toolkit import RobotTwinEnvAdapter, RobotTwinToolkit
+from .prompt import system_prompt, user_prompt
+from hy_harness.context.prompt_utils import format_prompt
+
+from .tools import RobotTwinEnvAdapter, RobotTwinTools
 
 
 def _truthy(value: Any) -> bool:
@@ -26,7 +28,7 @@ class RobotTwinHarnessPolicy:
     """Wrap a normal Hy-VLA policy with an optional high-level Planner.
 
     RoboTwin invokes eval once per simulator cycle. When enabled, the first
-    invocation runs the complete RPent Planner loop against the live TASK_ENV
+    invocation runs the complete HyHarness Planner loop against the live TASK_ENV
     object; later invocations are no-ops because the Planner has already
     consumed the episode actions.
     """
@@ -68,17 +70,16 @@ class RobotTwinHarnessPolicy:
         if not self.enabled or self._has_run:
             return self.result
 
-        from rpent.envs.prompt_bundle import PromptBundle
-        from rpent.planner.base import build_planner
-        from rpent.utils.config import get_hy_vla_root
-        from rpent.utils.logging import init_output_dir
+        from hy_harness.planner.base import build_planner
+        from hy_harness.utils.config import get_hy_vla_root
+        from hy_harness.utils.logging import init_output_dir
 
         adapter = RobotTwinEnvAdapter(
             task_env,
             observation=observation,
             observation_encoder=observation_encoder,
         )
-        toolkit = RobotTwinToolkit(env=adapter, policy=self.policy)
+        tools = RobotTwinTools(env=adapter, policy=self.policy)
 
         task_name = str(
             getattr(task_env, "task_name", None)
@@ -118,31 +119,22 @@ class RobotTwinHarnessPolicy:
             or "codebuddy"
         )
         model = os.environ.get("ROBOTWIN_HARNESS_MODEL") or self.config.get("model")
-        base_url = os.environ.get("ROBOTWIN_HARNESS_BASE_URL") or self.config.get(
-            "base_url"
-        )
         max_turns = int(
             os.environ.get("ROBOTWIN_HARNESS_MAX_TURNS")
             or self.config.get("max_turns", 100)
-        )
-        max_tokens = int(
-            os.environ.get("ROBOTWIN_HARNESS_MAX_TOKENS")
-            or self.config.get("max_tokens", 8192)
         )
         timeout_value = os.environ.get("ROBOTWIN_HARNESS_TIMEOUT_S")
         if timeout_value in (None, ""):
             timeout_value = self.config.get("planner_timeout_s")
         planner_timeout_s = None if timeout_value in (None, "") else int(timeout_value)
+        # codebuddy登场
         planner = build_planner(
             planner_type,
             output_dir=output_dir,
             recipe_tag=recipe_tag,
             env_name="robotwin",
-            base_url=base_url,
             model=model,
-            max_tokens=max_tokens,
             planner_timeout_s=planner_timeout_s,
-            no_images=bool(self.config.get("no_images", False)),
         )
 
         variables = {
@@ -151,9 +143,8 @@ class RobotTwinHarnessPolicy:
             "test_num": test_num,
             "output_dir": str(output_dir),
         }
-        prompts = PromptBundle(system=system_prompt, user=user_prompt)
-        system = prompts.render("system", variables=variables)
-        user = prompts.render("user", variables=variables)
+        system = format_prompt(system_prompt(), variables=variables)
+        user = format_prompt(user_prompt(), variables=variables)
 
         # Mark the episode consumed only after planner construction and solve.
         # This keeps a failed initialization retryable if RoboTwin invokes the
@@ -161,11 +152,11 @@ class RobotTwinHarnessPolicy:
         planner_result = planner.solve(
             system_prompt=system,
             user_message=user,
-            toolkit=toolkit,
+            toolkit=tools,
             max_turns=max_turns,
         )
         self._has_run = True
-        self.recipe_path = toolkit.write_recipe(recipe_tag)
+        self.recipe_path = tools.write_recipe(recipe_tag)
         self.result = {
             "finish": planner_result.finish_result,
             "stats": planner_result.stats,

@@ -3,6 +3,7 @@
 Inherits the common file/IO tools from :class:`Toolkit` and registers the
 LIBERO primitives (``move_to``, ``pi0_pick``, ``release``, ...) on top.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -11,11 +12,11 @@ from functools import partial
 from typing import Any
 
 from robots.libero import tools as libero_tools
-from rpent.tools.toolkit import Toolkit
-from rpent.utils.logging import get_logger, get_output_dir
+from hy_harness.tools.base import BaseTool
+from hy_harness.utils.logging import get_logger, get_output_dir
 
 
-class LiberoToolkit(Toolkit):
+class LiberoToolkit(BaseTool):
     """Toolkit for the LIBERO environment."""
 
     # Tool schemas keyed by name (built once from the canonical ordered list
@@ -137,13 +138,14 @@ class LiberoToolkit(Toolkit):
         primitives.start_recording()
         libero_tools.dump_state(primitives, str(out_dir), step_idx=0, log=None)
         if self._dashboard is not None:
-            self._dashboard.on_tool_result("view_driver_state", libero_tools.view_driver_state(0))
+            self._dashboard.on_tool_result(
+                "view_driver_state", libero_tools.view_driver_state(0)
+            )
 
         self._primitives = primitives
 
     def close(self) -> None:
-        """Flush the agent-side video buffer to disk (end-of-run).
-        """
+        """Flush the agent-side video buffer to disk (end-of-run)."""
         if self._video_path is None:
             return
         try:

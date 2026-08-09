@@ -13,9 +13,9 @@ from typing import Any
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
-from rpent.utils.config import get_checkpoint_path, get_hy_vla_root
-from rpent.utils.logging import get_logger
-from rpent.utils.rpc import RpcFacade
+from hy_harness.utils.config import get_checkpoint_path, get_hy_vla_root
+from hy_harness.utils.logging import get_logger
+from hy_harness.utils.rpc import RpcFacade
 
 root = str(get_hy_vla_root())
 if root not in sys.path:

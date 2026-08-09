@@ -10,9 +10,9 @@ import imageio.v2 as imageio
 import numpy as np
 
 from robots.libero.env_client import LiberoEnvClient
-from rpent.utils.logging import get_logger, get_output_dir
-from rpent.utils.sam3_client import Sam3Client
-from rpent.utils.vla_client import VLAClient
+from hy_harness.utils.logging import get_logger, get_output_dir
+from hy_harness.utils.sam3_client import Sam3Client
+from hy_harness.utils.vla_client import VLAClient
 
 logger = get_logger("libero")
 

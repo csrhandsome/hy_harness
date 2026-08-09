@@ -16,14 +16,14 @@ from typing import Any
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
-from rpent.utils.config import (
+from hy_harness.utils.config import (
     get_libero_config_dir,
     get_libero_root,
     get_libero_type,
     get_vla_adapter_root,
 )
-from rpent.utils.logging import get_logger
-from rpent.utils.rpc import RpcFacade
+from hy_harness.utils.logging import get_logger
+from hy_harness.utils.rpc import RpcFacade
 
 logger = get_logger("env_server")
 
@@ -82,7 +82,7 @@ def _to_numpy_tree(x: Any) -> Any:
 
 
 class NativeLiberoEnv:
-    """Single-env LIBERO wrapper exposing the RPent harness obs protocol."""
+    """Single-env LIBERO wrapper exposing the HyHarness harness obs protocol."""
 
     def __init__(
         self,
@@ -413,7 +413,7 @@ def main():
                 prev, args.cuda_device,
             )
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        from rpent.utils.egl import configure_egl_device
+        from hy_harness.utils.egl import configure_egl_device
         configure_egl_device(args.cuda_device)
         import torch
         torch.cuda.set_device(args.cuda_device)
