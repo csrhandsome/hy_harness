@@ -14,7 +14,7 @@ defaults:
 runtime_options:
   plugin: plugins/hy-embodied-vlm-1.0
   trust_remote_code: true
-  enforce_eager: true
+  enforce_eager: false
   reasoning_parser: hunyuan_v3
   tool_call_parser: hy_v3
   enable_auto_tool_choice: true

@@ -5,10 +5,10 @@ CodeBuddy's OpenAI-compatible client sends the MCP tool schemas, but omits
 structured call for the Harness only when the request says
 ``tool_choice="required"``. For RoboTwin it uses a small deterministic
 bootstrap: first force ``robotwin_observe``, then force one
-``robotwin_vla_step``. Later turns retain the normal ``auto`` policy so the
-model can decide whether to continue acting or call ``finish`` rather than
-being forced to observe forever. It otherwise transparently forwards HTTP
-traffic to the private vLLM backend.
+``robotwin_vla_step``. Subsequent turns keep ``tool_choice="required"`` but
+offer the full tool list, so the model chooses its own next action while still
+being obliged to emit a parseable call; ``finish`` ends the steering. It
+otherwise transparently forwards HTTP traffic to the private vLLM backend.
 
 The implementation uses only the standard library so the serving environment
 does not need another runtime dependency. Streaming Server-Sent Events are
@@ -25,8 +25,39 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
+#: MCP tool names arrive namespaced as ``mcp__<server>__<tool>``. Matching on
+#: the bare tool name keeps this proxy working when the server namespace is
+#: renamed -- a mismatch here silently disables the whole tool-choice
+#: bootstrap, because requests then look like generic OpenAI traffic.
+_MCP_PREFIX = "mcp__"
+_OBSERVE_TOOL = "robotwin_observe"
+_VLA_STEP_TOOL = "robotwin_vla_step"
+_FINISH_TOOL = "finish"
 
-def _has_rpent_tool(payload: dict[str, Any]) -> bool:
+#: Appended verbatim to the end of the prompt when the model has just observed.
+#: Kept as prose (not a tool-list restriction) so the model still chooses
+#: between acting, correcting and finishing.
+_ACT_NOW_REMINDER = (
+    "\n\nCRITICAL RULE: You have ALREADY observed and the observation is in "
+    "your context. You MUST NOT call robotwin_observe again now. Your ONLY "
+    "valid choices are robotwin_vla_step, robotwin_execute_ee, or finish. "
+    "Calling robotwin_observe is a protocol violation."
+)
+
+
+def _is_mcp_tool(name: str) -> bool:
+    """Return whether an OpenAI function name is MCP-namespaced."""
+    return name.startswith(_MCP_PREFIX) and name.count("__") >= 2
+
+
+def _bare_tool_name(name: str) -> str:
+    """Return the tool name without its ``mcp__<server>__`` namespace."""
+    if not _is_mcp_tool(name):
+        return name
+    return name.split("__", 2)[2]
+
+
+def _has_harness_tool(payload: dict[str, Any]) -> bool:
     """Return whether an OpenAI request includes a Harness MCP tool."""
     tools = payload.get("tools")
     if not isinstance(tools, list):
@@ -35,9 +66,7 @@ def _has_rpent_tool(payload: dict[str, Any]) -> bool:
         if not isinstance(tool, dict):
             continue
         function = tool.get("function")
-        if isinstance(function, dict) and str(function.get("name", "")).startswith(
-            "mcp__rpent__"
-        ):
+        if isinstance(function, dict) and _is_mcp_tool(str(function.get("name", ""))):
             return True
     return False
 
@@ -65,6 +94,50 @@ def _message_tool_history(payload: dict[str, Any]) -> set[str]:
     return names
 
 
+def _last_tool_called(payload: dict[str, Any]) -> str | None:
+    """Return the bare name of the most recent tool call, if any."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        for call in reversed(calls):
+            if name := _tool_name(call):
+                return _bare_tool_name(name)
+    return None
+
+
+def _append_act_now_reminder(payload: dict[str, Any]) -> bool:
+    """Append the act-next rule to the end of the last user-visible message.
+
+    Placement matters: measured on Hy-Embodied-VLM, the identical rule obeyed
+    0/4 times when placed at the top of the system prompt and 4/4 when placed
+    at the very end, immediately before generation. The rule is also
+    state-dependent ("you have already observed"), which is why it lives here
+    rather than as static text in the harness prompt.
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in ("user", "system"):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = content + _ACT_NOW_REMINDER
+            return True
+        if isinstance(content, list):
+            content.append({"type": "text", "text": _ACT_NOW_REMINDER})
+            return True
+    return False
+
+
 def _restrict_to_tool(payload: dict[str, Any], name: str) -> bool:
     """Keep exactly one named OpenAI function in the request's tool list."""
     tools = payload.get("tools")
@@ -89,29 +162,59 @@ def inject_required_tool_choice(
         payload = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body, False
-    if not isinstance(payload, dict) or not _has_rpent_tool(payload):
+    if not isinstance(payload, dict) or not _has_harness_tool(payload):
         return body, False
 
     choice = payload.get("tool_choice")
     if choice not in (None, "", "auto"):
         return body, False
 
-    available = {_tool_name(tool) for tool in payload.get("tools", [])}
-    observe = "mcp__rpent__robotwin_observe"
-    vla_step = "mcp__rpent__robotwin_vla_step"
-    history = _message_tool_history(payload)
+    # Resolve the namespaced names actually offered by this client, keyed by
+    # bare tool name, so a renamed MCP server still matches.
+    available = {
+        _bare_tool_name(name): name
+        for tool in payload.get("tools", [])
+        if (name := _tool_name(tool))
+    }
+    observe = available.get(_OBSERVE_TOOL)
+    vla_step = available.get(_VLA_STEP_TOOL)
+    history = {_bare_tool_name(name) for name in _message_tool_history(payload)}
 
-    # RoboTwin needs an initial perception/action pair. Without this, the
-    # model's auto mode either returns no call or repeatedly describes an
-    # observation in prose. Once the pair is complete, restore auto so finish
-    # remains a genuine model choice.
-    if observe in available:
-        if observe not in history and _restrict_to_tool(payload, observe):
+    # RoboTwin needs an initial perception/action pair, so the first two turns
+    # are pinned to exactly one tool each. After that the model picks the tool
+    # itself, but ``tool_choice`` stays "required" for the rest of the episode.
+    #
+    # Handing the loop back to "auto" does not work: this model only emits a
+    # parseable HYV3 tool call under "required" (see the module docstring).
+    # Under "auto" it degenerates into prose -- often a literal "<tool_call>
+    # {...}" string that the SDK never executes -- so the episode stalled after
+    # the bootstrap pair with the simulator frozen until max_turns/timeout.
+    #
+    # "required" alone is not enough either: it compels *a* call but not a
+    # useful one, and the model then re-observes indefinitely (measured: 98 of
+    # 101 calls in one episode were robotwin_observe, advancing the sim twice).
+    # So when the previous call was an observation, append the act-now rule to
+    # the end of the prompt. ``finish`` stays a genuine model choice: it is
+    # offered every turn, and once called the harness stops steering.
+    if observe is not None:
+        if _OBSERVE_TOOL not in history and _restrict_to_tool(payload, observe):
             payload["tool_choice"] = "required"
-        elif vla_step not in history and _restrict_to_tool(payload, vla_step):
+        elif (
+            _VLA_STEP_TOOL not in history
+            and vla_step is not None
+            and _restrict_to_tool(payload, vla_step)
+        ):
             payload["tool_choice"] = "required"
-        else:
+        elif _FINISH_TOOL in history:
+            # The model already chose to finish; stop steering it.
             return body, False
+        else:
+            # Keep the full tool list so the model chooses among observe,
+            # vla_step, execute_ee and finish -- only the "must call a tool"
+            # constraint is imposed.
+            payload["tool_choice"] = "required"
+            if _last_tool_called(payload) == _OBSERVE_TOOL:
+                _append_act_now_reminder(payload)
     else:
         # Non-RoboTwin Harnesses retain the conservative previous behavior:
         # make only their initial MCP request choose a tool, then leave later

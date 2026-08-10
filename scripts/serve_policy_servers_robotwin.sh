@@ -75,7 +75,7 @@ trap cleanup EXIT INT TERM
 for i in "${!GPU_ARR[@]}"; do
   gpu="${GPU_ARR[$i]}"
   port=$((BASE_PORT + i))
-  echo "launching: gpu=${gpu} port=${port} log=${LOG_DIR}/gpu${gpu}.log"
+  echo "launching: gpu=${gpu} port=${port} log=${LOG_DIR}/gpu${gpu}_p${port}.log"
   CUDA_VISIBLE_DEVICES="${gpu}" \
   uv run --locked --no-sync vla-policy-server \
     --benchmark robotwin \
@@ -87,7 +87,7 @@ for i in "${!GPU_ARR[@]}"; do
     --img-history-interval "${IMG_HISTORY_INTERVAL}" \
     --host "${HOST}" \
     --port "${port}" \
-    > "${LOG_DIR}/gpu${gpu}.log" 2>&1 &
+    > "${LOG_DIR}/gpu${gpu}_p${port}.log" 2>&1 &
   PIDS+=("$!")
 done
 
@@ -104,7 +104,7 @@ for i in "${!GPU_ARR[@]}"; do
         2>/dev/null | grep -q '"ok": *true'; do
     if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
       echo "  gpu=${gpu} port=${port}: FAILED. Tail of its log:" >&2
-      tail -25 "${LOG_DIR}/gpu${gpu}.log" >&2
+      tail -25 "${LOG_DIR}/gpu${gpu}_p${port}.log" >&2
       exit 3
     fi
     if (( SECONDS > deadline )); then

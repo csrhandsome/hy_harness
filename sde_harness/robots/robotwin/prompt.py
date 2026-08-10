@@ -25,9 +25,11 @@ def system_prompt() -> PromptNode:
             "action quaternions use wxyz."
         ),
         "WORKFLOW": (
-            "Observe, choose a small action budget, execute, observe again, "
-            "and stop when the benchmark reports success or the task is "
-            "clearly unrecoverable. Call finish with an honest status."
+            "Alternate strictly: act, then observe, then act again. Never call "
+            "robotwin_observe twice in a row -- an observation only becomes "
+            "useful after the scene has changed. Stop when the benchmark "
+            "reports success or the task is clearly unrecoverable. Call finish "
+            "with an honest status."
         ),
     }
 
