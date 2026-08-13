@@ -32,6 +32,7 @@ from hy_harness.utils.logging import get_logger, init_output_dir
 logger = get_logger("codebuddy")
 
 DEFAULT_MODEL = "hy_a3b"
+DEFAULT_INVALID_TEXT_RETRIES = 3
 
 # ---------------------------------------------------------------------------
 # Public backend
@@ -64,6 +65,15 @@ class CodeBuddyPlanner:
         self._output_path = Path(output_path) if output_path else None
         self._dashboard = dashboard
         self._api_key = os.environ.get("CODEBUDDY_API_KEY")
+        self._invalid_text_retries = max(
+            0,
+            int(
+                os.environ.get(
+                    "CODEBUDDY_INVALID_TEXT_RETRIES",
+                    str(DEFAULT_INVALID_TEXT_RETRIES),
+                )
+            ),
+        )
 
     def solve(
         self,
@@ -146,6 +156,7 @@ class CodeBuddyPlanner:
                         prompt,
                         options,
                         recorder,
+                        toolkit=toolkit,
                         timeout_s=self._timeout_s,
                         emit=_emit,
                     )
@@ -206,6 +217,7 @@ class CodeBuddyPlanner:
         options: Any,
         recorder: "_Recorder",
         *,
+        toolkit: BaseTool,
         timeout_s: int,
         emit,
     ) -> None:
@@ -220,6 +232,8 @@ class CodeBuddyPlanner:
         """
         async with sdk.CodeBuddySDKClient(options=options) as client:
             await client.query(prompt)
+            deadline = asyncio.get_running_loop().time() + timeout_s
+            retries = 0
 
             async def consume_response() -> None:
                 async for message in client.receive_response():
@@ -230,31 +244,59 @@ class CodeBuddyPlanner:
                             await client.interrupt()
                         return
 
-            consumer = asyncio.create_task(consume_response())
-            done, _ = await asyncio.wait({consumer}, timeout=timeout_s)
-            if consumer in done:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+
+                consumer = asyncio.create_task(consume_response())
+                done, _ = await asyncio.wait({consumer}, timeout=remaining)
+                if consumer not in done:
+                    # Do not use asyncio.wait_for() here: it cancels the task
+                    # that is directly iterating the SDK stream. Instead, ask
+                    # the CLI to stop and give that same stream a short chance
+                    # to finish normally.
+                    with contextlib.suppress(Exception):
+                        await client.interrupt()
+                    done, _ = await asyncio.wait({consumer}, timeout=10)
+                    if consumer in done:
+                        consumer.result()
+                    if not consumer.done():
+                        consumer.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await consumer
+                    raise asyncio.TimeoutError
+
                 # Propagate an SDK/CLI failure before the context manager
                 # disconnects the session.
                 consumer.result()
-                return
+                if recorder.finish_result is not None:
+                    return
 
-            # Do not use asyncio.wait_for() here: it cancels the task that is
-            # directly iterating the SDK stream. Instead, ask the CLI to stop
-            # through its protocol and give that same stream a short chance to
-            # finish normally.
-            with contextlib.suppress(Exception):
-                await client.interrupt()
-            done, _ = await asyncio.wait({consumer}, timeout=10)
-            if consumer in done:
-                consumer.result()
+                status = _toolkit_status(toolkit)
+                if not _status_requires_tool_call(status):
+                    return
+                if retries >= self._invalid_text_retries:
+                    recorder.error = (
+                        "Planner returned non-terminal text "
+                        f"{retries + 1} times while RoboTwin remained active"
+                    )
+                    return
 
-            if not consumer.done():
-                consumer.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await consumer
-
-            # The caller formats this as the normal planner timeout error.
-            raise asyncio.TimeoutError
+                retries += 1
+                recorder.invalid_terminal_retries += 1
+                continuation = _invalid_terminal_continuation(
+                    status=status,
+                    retry=retries,
+                    limit=self._invalid_text_retries,
+                )
+                logger.warning(
+                    "planner emitted non-terminal text while RoboTwin remains active; "
+                    "sending continuation retry %d/%d",
+                    retries,
+                    self._invalid_text_retries,
+                )
+                await client.query(continuation)
 
     async def _run_interactive(
         self,
@@ -372,7 +414,10 @@ class CodeBuddyPlanner:
             cwd=self._repo_root,
             model=self._model,
             max_turns=max_turns,
-            tools=builtins or None,
+            # The SDK treats ``None`` as "enable every built-in tool", while
+            # an empty list disables them. RoboTwin passes an empty built-in
+            # allowlist so the planner cannot escape the scoped MCP toolkit.
+            tools=builtins,
             allowed_tools=list(dict.fromkeys(allowed)),
             permission_mode="bypassPermissions",
             mcp_servers={
@@ -414,11 +459,13 @@ class _Recorder:
     finish_result: dict[str, Any] | None = None
     error: str | None = None
     suppress_next_result_error: bool = False
+    invalid_terminal_retries: int = 0
 
     def stats(self) -> dict[str, int | float | None]:
         return {
             "turns_used": self.turns,
             "tool_calls": self.tool_calls,
+            "invalid_terminal_retries": self.invalid_terminal_retries,
             "total_cost_usd": self.total_cost_usd,
             **self.usage,
         }
@@ -516,6 +563,10 @@ class _Recorder:
     ) -> str:
         self.tool_calls += 1
         name = self.tool_names.get(tool_use_id, "tool_result")
+        result_payload = _tool_result_payload(content)
+        is_error = bool(is_error) or bool(
+            isinstance(result_payload, dict) and result_payload.get("error")
+        )
         summary: dict[str, Any] = {"size": _payload_size(content)}
         image_count = _content_image_count(content)
         if image_count:
@@ -523,8 +574,18 @@ class _Recorder:
         if is_error:
             summary["is_error"] = bool(is_error)
         pending = self.pending_finish.pop(tool_use_id, None)
-        if pending is not None and not is_error and self.finish_result is None:
-            self.finish_result = {"_finish": True, **pending}
+        if (
+            pending is not None
+            and not is_error
+            and isinstance(result_payload, dict)
+            and result_payload.get("_finish") is True
+            and self.finish_result is None
+        ):
+            # A finish request is only terminal when the *tool result*
+            # explicitly confirms it. CodeBuddy can serialize rejected MCP
+            # results as text with ``is_error=false``; trusting the original
+            # tool request would incorrectly interrupt the planner.
+            self.finish_result = result_payload
         if self.dashboard is not None:
             self.dashboard.on_event(
                 {
@@ -621,25 +682,51 @@ def _tool_result_to_mcp(tr: Any) -> dict[str, Any]:
     if blocks is None:
         return {"content": [{"type": "text", "text": str(tr)}]}
 
-    content: list[dict[str, Any]] = []
+    text_blocks: list[str] = []
+    images: list[dict[str, str]] = []
     for block in blocks:
         block_type = _get(block, "type")
         if block_type == "text":
-            content.append({"type": "text", "text": _get(block, "text", "")})
+            text_blocks.append(str(_get(block, "text", "")))
         elif block_type == "image":
             src = _get(block, "source", {})
-            content.append(
+            images.append(
                 {
-                    "type": "image",
                     "data": _get(src, "data", ""),
                     "mimeType": _get(src, "media_type", "image/png"),
                 }
             )
 
+    if images:
+        # CodeBuddy's chat-completions transport accepts text-only tool
+        # results. Preserve the images in a private JSON envelope; the local
+        # proxy decodes it before forwarding the turn to vLLM as image_url
+        # user content.
+        content = [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "_hyharness_multimodal": {
+                            "text": "\n".join(text_blocks),
+                            "images": images,
+                        }
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+        ]
+    else:
+        content = [{"type": "text", "text": text} for text in text_blocks]
+
     response: dict[str, Any] = {"content": content}
     result_dict = getattr(tr, "result", None)
     if isinstance(result_dict, dict) and result_dict.get("error"):
-        response["is_error"] = True
+        # MCP's CallToolResult schema uses camelCase. ``is_error`` is ignored
+        # by CodeBuddy's MCP client and makes failed file/tool calls look like
+        # normal observations to the planner.
+        response["isError"] = True
     return response
 
 
@@ -733,6 +820,83 @@ def _usage_dict(usage: Any) -> dict[str, Any]:
     if dataclasses.is_dataclass(usage):
         return dataclasses.asdict(usage)
     return {}
+
+
+def _tool_result_payload(content: Any) -> dict[str, Any] | None:
+    """Recover the result dict nested in CodeBuddy's tool-result text.
+
+    The SDK can wrap an MCP result as nested lists/dicts and JSON-encoded text,
+    e.g. ``[{"type": "text", "text": "[{\\"type\\": ...}]"}]``.
+    """
+    pending: list[Any] = [content]
+    seen_strings: set[str] = set()
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if "_finish" in value or "error" in value:
+                return value
+            pending.extend(
+                value.get(key) for key in ("content", "text") if key in value
+            )
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+        elif dataclasses.is_dataclass(value):
+            pending.append(dataclasses.asdict(value))
+        elif isinstance(value, str) and value not in seen_strings:
+            seen_strings.add(value)
+            try:
+                pending.append(json.loads(value))
+            except json.JSONDecodeError:
+                continue
+        else:
+            nested = [
+                _get(value, key)
+                for key in ("content", "text")
+                if _get(value, key) is not None
+            ]
+            pending.extend(nested)
+    return None
+
+
+def _toolkit_status(toolkit: BaseTool) -> dict[str, Any] | None:
+    """Read a live environment status when the toolkit exposes one."""
+    status = getattr(toolkit, "status", None)
+    if not callable(status):
+        return None
+    try:
+        value = status()
+    except Exception:  # noqa: BLE001 - status is advisory for generic toolkits
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _status_requires_tool_call(status: dict[str, Any] | None) -> bool:
+    """Return whether a text-only completion is invalid for this toolkit."""
+    return (
+        bool(status)
+        and not bool(status.get("success"))
+        and not bool(status.get("done"))
+    )
+
+
+def _invalid_terminal_continuation(
+    *,
+    status: dict[str, Any],
+    retry: int,
+    limit: int,
+) -> str:
+    remaining = ""
+    count = status.get("take_action_cnt")
+    step_limit = status.get("step_lim")
+    if count is not None and step_limit is not None:
+        remaining = f" Current simulator actions: {count}/{step_limit}."
+    return (
+        "INVALID TERMINATION: your previous response ended in prose without a "
+        "valid RoboTwin terminal tool result. The authoritative state remains "
+        f"success=false and done=false.{remaining} Do not explain, summarize, "
+        "write an audit, emit literal <tool_call> text, or call finish. Use the "
+        f"real tool-call channel to call an allowed RoboTwin tool now. Retry {retry}/{limit}."
+    )
 
 
 def _message_to_json(message: Any) -> dict[str, Any]:
