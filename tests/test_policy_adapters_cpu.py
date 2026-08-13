@@ -17,6 +17,19 @@ class _FakeLiberoModel:
 
 
 class _FakeRobotwinModel:
+    action_chunk_size = 50
+    default_execute_steps = 30
+
+    def invalidate_action_cache(self):
+        self.invalidated = True
+
+    def observe(self, batch):
+        self.observed = True
+
+    def get_action_chunk(self, batch, *, max_actions=None):
+        assert max_actions == 2
+        return np.arange(48, dtype=np.float32).reshape(3, 16)
+
     def get_action(self, batch):
         assert batch["observation.state"].shape == (1, 32)
         assert batch["observation.images.top_head"].shape == (1, 3, 6, 7)
@@ -52,8 +65,19 @@ class PolicyAdapterCpuTest(unittest.TestCase):
             },
         )
         np.testing.assert_array_equal(result["action"], np.arange(16, dtype=np.float32))
+        chunk = adapter.dispatch(
+            "robotwin.chunk",
+            {
+                "instruction": "move",
+                "images": {"top": image, "left": image, "right": image},
+                "state": np.zeros(16, dtype=np.float32),
+                "max_actions": 2,
+            },
+        )
+        self.assertEqual(chunk["actions"].shape, (3, 16))
+        self.assertTrue(chunk["fresh_forward"])
+        self.assertTrue(adapter.dispatch("robotwin.invalidate_cache", {})["ok"])
 
 
 if __name__ == "__main__":
     unittest.main()
-

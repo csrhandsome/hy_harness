@@ -65,6 +65,7 @@ def build_planner(
     env_name: str,
     model: str | None = None,
     planner_timeout_s: int | None = None,
+    allowed_tools: str | None = None,
     dashboard: Any = None,
 ):
     """只保留了codebuddy的planer
@@ -86,6 +87,9 @@ def build_planner(
             repo_root=get_repo_root(),
             model=model,
             timeout_s=cb_timeout_s,
+            allowed_tools=(
+                "Bash Read Write Glob Grep" if allowed_tools is None else allowed_tools
+            ),
             extra_dirs=[str(get_memory_dir(env_name))],
             output_path=Path(output_dir) / f"codebuddy_{recipe_tag}.txt",
             dashboard=dashboard,

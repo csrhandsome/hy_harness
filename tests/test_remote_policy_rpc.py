@@ -4,11 +4,11 @@ import threading
 import unittest
 
 import numpy as np
+from vla_protocol import RpcServer
 
 from hy_vla.policy_server.server import PolicyRpcService
 from libero_eval.remote_policy import RemoteLiberoPolicy
 from robotwin_eval.remote_policy import RemoteRobotwinPolicy
-from vla_protocol import RpcServer
 
 
 class _FakeAdapter:
@@ -17,6 +17,8 @@ class _FakeAdapter:
         self.reset_count = 0
 
     def metadata(self):
+        if self.benchmark == "robotwin":
+            return {"fake": True, "action_chunk_size": 50, "default_execute_steps": 30}
         return {"fake": True}
 
     def reset(self):
@@ -39,6 +41,12 @@ class _FakeAdapter:
                 "shape": [16],
                 "dtype": "float32",
             }
+        if method == "robotwin.chunk":
+            assert kwargs["max_actions"] == 2
+            actions = np.arange(48, dtype=np.float32).reshape(3, 16)
+            return {"actions": actions, "shape": [3, 16], "dtype": "float32"}
+        if method in {"robotwin.observe", "robotwin.invalidate_cache"}:
+            return {"ok": True}
         raise AssertionError(method)
 
 
@@ -94,10 +102,16 @@ class RemotePolicyRpcTest(unittest.TestCase):
             np.testing.assert_array_equal(
                 policy.get_action(batch), np.arange(16, dtype=np.float32)
             )
+            chunk = policy.get_action_chunk(batch, max_actions=2)
+            np.testing.assert_array_equal(
+                chunk, np.arange(48, dtype=np.float32).reshape(3, 16)
+            )
+            policy.observe(batch)
+            policy.invalidate_action_cache()
+            self.assertEqual(policy.action_chunk_size, 50)
             self.assertGreaterEqual(adapter.reset_count, 1)
             policy.close()
 
 
 if __name__ == "__main__":
     unittest.main()
-

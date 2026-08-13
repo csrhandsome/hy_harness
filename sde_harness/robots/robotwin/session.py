@@ -10,9 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .prompt import system_prompt, user_prompt
 from hy_harness.context.prompt_utils import format_prompt
 
+from .prompt import PROMPT_PROFILES, system_prompt, user_prompt
 from .tools import RobotTwinEnvAdapter, RobotTwinTools
 
 
@@ -73,14 +73,13 @@ class RobotTwinHarnessPolicy:
         from hy_harness.planner.base import build_planner
         from hy_harness.utils.config import get_hy_vla_root
         from hy_harness.utils.logging import init_output_dir
+        from hy_harness.utils.resources import ensure_resources
 
         adapter = RobotTwinEnvAdapter(
             task_env,
             observation=observation,
             observation_encoder=observation_encoder,
         )
-        tools = RobotTwinTools(env=adapter, policy=self.policy)
-
         task_name = str(
             getattr(task_env, "task_name", None)
             or getattr(task_env, "task", None)
@@ -99,15 +98,23 @@ class RobotTwinHarnessPolicy:
                 get_hy_vla_root()
                 / "logs"
                 / "robotwin_harness"
-                / f"{recipe_tag}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                / f"{recipe_tag}_{datetime.now().astimezone().strftime('%Y%m%d-%H%M%S')}"
             )
         output_dir = init_output_dir(output_dir)
 
-        # Code-oriented planners may inspect environment-specific memory.
-        # RoboTwin does not ship that directory with this repository, so make
-        # the mount point available without requiring a fake memory file.
-        (get_hy_vla_root() / "sde_harness" / "resources" / "robotwin" / "memory").mkdir(
-            parents=True, exist_ok=True
+        # RPent-style, reviewed read-only memory snapshot. Synchronization is
+        # best-effort and falls back to the checked-in local starter index.
+        resources_dir = ensure_resources("robotwin")
+        memory_dir = resources_dir / "memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        reference_dir = resources_dir / "references"
+        audit_path = output_dir / f"{recipe_tag}.json"
+        tools = RobotTwinTools(
+            env=adapter,
+            policy=self.policy,
+            output_dir=output_dir,
+            audit_path=audit_path,
+            read_roots=[memory_dir, reference_dir],
         )
 
         # Environment variables are explicit per-run launcher overrides. Read
@@ -127,6 +134,20 @@ class RobotTwinHarnessPolicy:
         if timeout_value in (None, ""):
             timeout_value = self.config.get("planner_timeout_s")
         planner_timeout_s = None if timeout_value in (None, "") else int(timeout_value)
+        prompt_profile = (
+            str(
+                os.environ.get("ROBOTWIN_HARNESS_PROMPT_PROFILE")
+                or self.config.get("prompt_profile")
+                or "primitive_first"
+            )
+            .strip()
+            .lower()
+        )
+        if prompt_profile not in PROMPT_PROFILES:
+            raise ValueError(
+                f"unknown RoboTwin prompt_profile={prompt_profile!r}; "
+                f"expected one of {PROMPT_PROFILES}"
+            )
         # codebuddy登场
         planner = build_planner(
             planner_type,
@@ -135,6 +156,7 @@ class RobotTwinHarnessPolicy:
             env_name="robotwin",
             model=model,
             planner_timeout_s=planner_timeout_s,
+            allowed_tools=str(self.config.get("allowed_tools", "")),
         )
 
         variables = {
@@ -142,8 +164,17 @@ class RobotTwinHarnessPolicy:
             "task_name": task_name,
             "test_num": test_num,
             "output_dir": str(output_dir),
+            "prompt_profile": prompt_profile,
+            "memory_dir": str(memory_dir),
+            "reference_dir": str(reference_dir),
+            "audit_path": str(audit_path),
+            "recipe_path": str(output_dir / f"recipe_{recipe_tag}.jsonl"),
+            "model_chunk_size": int(getattr(self.policy, "action_chunk_size", 50)),
+            "default_execute_steps": int(
+                getattr(self.policy, "default_execute_steps", 30)
+            ),
         }
-        system = format_prompt(system_prompt(), variables=variables)
+        system = format_prompt(system_prompt(prompt_profile), variables=variables)
         user = format_prompt(user_prompt(), variables=variables)
 
         # Mark the episode consumed only after planner construction and solve.
@@ -157,11 +188,41 @@ class RobotTwinHarnessPolicy:
         )
         self._has_run = True
         self.recipe_path = tools.write_recipe(recipe_tag)
+        audit: dict[str, Any] = {}
+        if audit_path.is_file():
+            try:
+                loaded = json.loads(audit_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    audit = loaded
+            except (OSError, json.JSONDecodeError):
+                pass
+        audit.setdefault("task", adapter.instruction())
+        audit.setdefault("task_name", task_name)
+        audit.setdefault("test_num", test_num)
+        audit.setdefault("prompt_profile", prompt_profile)
+        audit.setdefault(
+            "strategy",
+            "automatic fallback audit; planner did not persist valid JSON",
+        )
+        audit.setdefault("outcome", planner_result.finish_result)
+        audit.setdefault("failure_reason", planner_result.error)
+        audit.update(
+            benchmark_success=adapter.status()["success"],
+            final_status=adapter.status(),
+            memory_files_read=tools.artifact_summary()["files_read"],
+            **tools.artifact_summary(),
+        )
+        audit_path.write_text(
+            json.dumps(audit, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
         self.result = {
             "finish": planner_result.finish_result,
             "stats": planner_result.stats,
             "error": planner_result.error,
             "recipe": self.recipe_path,
+            "audit": str(audit_path),
+            "prompt_profile": prompt_profile,
             "output_dir": str(output_dir),
         }
         (output_dir / f"{recipe_tag}_result.json").write_text(

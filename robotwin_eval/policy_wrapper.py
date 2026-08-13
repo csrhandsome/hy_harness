@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright (C) 2026 Tencent.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -50,9 +49,10 @@ from typing import Any
 
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation as R, Slerp
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
-from hy_vla import HyVLAConfig, HyVLA
+from hy_vla import HyVLA, HyVLAConfig
 from hy_vla.utils.transform_utils import (
     convert_frame_robo_to_umi,
     convert_frame_umi_to_robo,
@@ -134,7 +134,9 @@ class HyVLAPolicyWrapper:
         self.weight_dtype = weight_dtype
         self.config = HyVLAConfig.from_pretrained(ckpt_path)
         self.policy = HyVLA.from_pretrained(
-            ckpt_path, config=self.config, vlm_model_path=vlm_model_path,
+            ckpt_path,
+            config=self.config,
+            vlm_model_path=vlm_model_path,
         )
         self.policy.enable_video_encoder_if_needed()
         self.policy.cuda()
@@ -148,7 +150,9 @@ class HyVLAPolicyWrapper:
             and self.norm_data.get("act_std_abs") is not None
         )
         if self._has_abs_stats:
-            assert self.norm_data["act_mean_abs"].shape == self.norm_data["act_mean"].shape, (
+            assert (
+                self.norm_data["act_mean_abs"].shape == self.norm_data["act_mean"].shape
+            ), (
                 f"abs act_mean shape {self.norm_data['act_mean_abs'].shape} must match "
                 f"rel act_mean shape {self.norm_data['act_mean'].shape}"
             )
@@ -168,6 +172,12 @@ class HyVLAPolicyWrapper:
 
         # Per-episode state.
         self.exc_action_size = int(exc_action_size)
+        # rel+abs checkpoints emit two token halves for one physical chunk.
+        model_tokens = int(self.config.chunk_size)
+        self.action_chunk_size = (
+            model_tokens // 2 if self._has_abs_stats else model_tokens
+        )
+        self.default_execute_steps = min(self.exc_action_size, self.action_chunk_size)
         self.action_cache: deque[np.ndarray] = deque()
 
         # MEM video-encoder cadence.
@@ -193,6 +203,15 @@ class HyVLAPolicyWrapper:
         self._right_imgs.clear()
         return "Hy-VLA wrapper reset"
 
+    def invalidate_action_cache(self) -> None:
+        """Discard actions decoded against an earlier environment state."""
+        self.action_cache.clear()
+
+    def observe(self, batch: dict[str, Any]) -> None:
+        """Ingest one frame into MEM history without running inference."""
+        if self.use_video_encoder:
+            self._append_history_frames(batch)
+
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
@@ -204,15 +223,29 @@ class HyVLAPolicyWrapper:
         which keeps the overall RoboTwin step cadence equal to one model
         forward per ``exc_action_size`` env steps.
         """
-        # Always grow the per-camera frame buffers on every call so that
-        # the K-frame stack stays time-aligned even while we are serving
-        # cached actions.
-        if self.use_video_encoder:
-            self._append_history_frames(batch)
+        self.observe(batch)
 
         if len(self.action_cache) > 0:
             return self.action_cache.popleft()
 
+        actions_wxyz = self._predict_fresh_chunk(batch)
+        for action in actions_wxyz[1 : self.default_execute_steps]:
+            self.action_cache.append(action)
+        return actions_wxyz[0]
+
+    def get_action_chunk(
+        self, batch: dict[str, Any], *, max_actions: int | None = None
+    ) -> np.ndarray:
+        """Run one fresh forward and return a prefix from only that new chunk."""
+        self.invalidate_action_cache()
+        self.observe(batch)
+        actions = self._predict_fresh_chunk(batch)
+        limit = len(actions) if max_actions is None else int(max_actions)
+        limit = max(1, min(limit, len(actions)))
+        return actions[:limit].copy()
+
+    def _predict_fresh_chunk(self, batch: dict[str, Any]) -> np.ndarray:
+        """Run the network once and decode the complete physical action chunk."""
         initial_ee_pose_wxyz = batch["observation.state"][0, :16].copy()
         # wxyz → xyzw
         initial_ee_pose_xyzw = initial_ee_pose_wxyz.copy()
@@ -234,19 +267,28 @@ class HyVLAPolicyWrapper:
         state[11:15] = state[[12, 13, 14, 11]]
         if self.umi_coord_frame:
             state = convert_frame_robo_to_umi(
-                state[None, :], convert_gripper=self.umi_gripper_space,
+                state[None, :],
+                convert_gripper=self.umi_gripper_space,
             )[0]
-        ee_prop = np.concatenate([
-            pos_quat_to_pos_rotation_matrix(state[:3], state[3:7], state[7]),
-            pos_quat_to_pos_rotation_matrix(state[8:11], state[11:15], state[15]),
-        ])
-        batch["observation.state"] = ((ee_prop - self.norm_data["qpos_mean"]) / self.norm_data["qpos_std"])[None, ...]
+        ee_prop = np.concatenate(
+            [
+                pos_quat_to_pos_rotation_matrix(state[:3], state[3:7], state[7]),
+                pos_quat_to_pos_rotation_matrix(state[8:11], state[11:15], state[15]),
+            ]
+        )
+        batch["observation.state"] = (
+            (ee_prop - self.norm_data["qpos_mean"]) / self.norm_data["qpos_std"]
+        )[None, ...]
 
         if self.use_video_encoder:
             self._inject_history_stacks(batch)
 
         for k, v in batch.items():
-            if isinstance(v, np.ndarray) and not k.startswith("raw_images.") and k != "task":
+            if (
+                isinstance(v, np.ndarray)
+                and not k.startswith("raw_images.")
+                and k != "task"
+            ):
                 batch[k] = torch.from_numpy(v).to(self.weight_dtype).cuda()
             elif isinstance(v, torch.Tensor):
                 batch[k] = v.to(self.weight_dtype).cuda()
@@ -263,21 +305,21 @@ class HyVLAPolicyWrapper:
         # UMI → RoboTwin coordinate frame, then xyzw → wxyz
         if self.umi_coord_frame:
             actions_xyzw = convert_frame_umi_to_robo(
-                actions_xyzw, convert_gripper=self.umi_gripper_space,
+                actions_xyzw,
+                convert_gripper=self.umi_gripper_space,
             )
         actions_wxyz = actions_xyzw.copy()
         actions_wxyz[:, 3:7] = actions_xyzw[:, [6, 3, 4, 5]]
         actions_wxyz[:, 11:15] = actions_xyzw[:, [14, 11, 12, 13]]
 
-        # Cache the rest of the chunk for subsequent calls.
-        for action in actions_wxyz[1 : self.exc_action_size]:
-            self.action_cache.append(action)
-        return actions_wxyz[0]
+        return actions_wxyz
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-    def _decode_actions(self, actions: np.ndarray, initial_ee_pose_xyzw: np.ndarray) -> np.ndarray:
+    def _decode_actions(
+        self, actions: np.ndarray, initial_ee_pose_xyzw: np.ndarray
+    ) -> np.ndarray:
         """Apply rel/abs/blend decoding to ``(T, 20)`` raw network output."""
         if not self._has_abs_stats:
             actions = actions * self.norm_data["act_std"] + self.norm_data["act_mean"]
@@ -293,7 +335,8 @@ class HyVLAPolicyWrapper:
         actions_p2 = None
         if self.blend_mode in ("rel_abs", "rel_only"):
             rel = (
-                actions[:half, :20] * self.norm_data["act_std"] + self.norm_data["act_mean"]
+                actions[:half, :20] * self.norm_data["act_std"]
+                + self.norm_data["act_mean"]
             )
             actions_p1 = relative_to_dual_arm_poses(rel, initial_ee_pose_xyzw)
 
@@ -323,7 +366,9 @@ class HyVLAPolicyWrapper:
         self._right_imgs.append(batch["raw_images.hand_right"])
 
     @staticmethod
-    def _eval_history_indices(step_id: int, history_size: int, interval: int) -> list[int]:
+    def _eval_history_indices(
+        step_id: int, history_size: int, interval: int
+    ) -> list[int]:
         """Equally-spaced past-frame indices on the per-camera buffer.
 
         Slot ``history_size - 1`` is the current frame; earlier slots are

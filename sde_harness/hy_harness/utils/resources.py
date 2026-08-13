@@ -4,21 +4,26 @@
 reference recipes), not model weights. Total size is on the order of hundreds
 of KB.
 """
+
 from __future__ import annotations
 
 import os
+from functools import cache
 from pathlib import Path
 
 from hy_harness.utils.config import get_resources_dir
 from hy_harness.utils.logging import get_logger
 
-RESOURCES_HF_REPO = os.environ.get("HYHARNESS_RESOURCES_HF_REPO", "RLinf/HyHarness-memory")
+RESOURCES_HF_REPO = os.environ.get(
+    "HYHARNESS_RESOURCES_HF_REPO", "RLinf/HyHarness-memory"
+)
 
 logger = get_logger("resources")
 
 
+@cache
 def ensure_resources(env_name: str) -> Path:
-    """Sync the env's text resources from HuggingFace each run.
+    """Sync an env text snapshot once per worker process.
 
     Set ``HF_HUB_OFFLINE=1`` to use the local copy only. Missing memory is
     non-fatal — the agent can still run without it.
@@ -40,10 +45,13 @@ def ensure_resources(env_name: str) -> Path:
             local_dir=str(resources_dir.parent),
             allow_patterns=[f"{env_name}/**"],
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - offline fallback must be non-fatal
         logger.warning(
             "could not sync '%s' from '%s': %s; continuing with local files under %s",
-            env_name, RESOURCES_HF_REPO, exc, resources_dir,
+            env_name,
+            RESOURCES_HF_REPO,
+            exc,
+            resources_dir,
         )
 
     return resources_dir

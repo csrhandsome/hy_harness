@@ -11,7 +11,18 @@ __pycache__/
 # Local run outputs.
 logs/
 
-/resources/
+/resources/*
+!/resources/robotwin/
+/resources/robotwin/*
+!/resources/robotwin/memory/
+/resources/robotwin/memory/*
+!/resources/robotwin/memory/MEMORY.md
+!/resources/robotwin/memory/control_and_chunk_semantics.md
+!/resources/robotwin/memory/bimanual_ee_conventions.md
+!/resources/robotwin/memory/failure_and_audit_protocol.md
+!/resources/robotwin/references/
+/resources/robotwin/references/*
+!/resources/robotwin/references/README.md
 
 # Prefer the repo-root .venv (uv workspace). Ignore a leftover local venv.
 .venv/

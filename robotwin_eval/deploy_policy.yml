@@ -33,7 +33,7 @@ blend_mode: rel_abs
 # Number of consecutive eval steps served from a single network forward.
 # The wrapper amortizes one forward over `exc_action_size` env steps via
 # its action cache.
-exc_action_size: 7
+exc_action_size: 30
 
 # --- MEM video-encoder cadence -------------------------------------------
 img_history_size: 6
@@ -51,6 +51,10 @@ harness:
   enabled: false
   planner: codebuddy
   model: hy_a3b
+  # primitive_first or vla_first
+  prompt_profile: primitive_first
+  # Empty means only the scoped HyHarness MCP tools; opt in explicitly if needed.
+  allowed_tools: ""
   max_turns: 100
   # Optional CodeBuddy planner timeout (seconds).
   # planner_timeout_s: 1200

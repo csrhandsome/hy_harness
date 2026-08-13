@@ -3,9 +3,8 @@
 CodeBuddy's OpenAI-compatible client sends the MCP tool schemas, but omits
 ``tool_choice``. Hy-Embodied-VLM's vLLM ``hy_v3`` tool parser reliably emits a
 structured call for the Harness only when the request says
-``tool_choice="required"``. For RoboTwin it uses a small deterministic
-bootstrap: first force ``robotwin_observe``, then force one
-``robotwin_vla_step``. Subsequent turns keep ``tool_choice="required"`` but
+``tool_choice="required"``. For RoboTwin it does not force a particular tool; the prompt profile remains
+free to select memory, perception, VLA chunks, or deterministic primitives. Subsequent turns keep ``tool_choice="required"`` but
 offer the full tool list, so the model chooses its own next action while still
 being obliged to emit a parseable call; ``finish`` ends the steering. It
 otherwise transparently forwards HTTP traffic to the private vLLM backend.
@@ -20,7 +19,6 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
-import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
@@ -31,7 +29,6 @@ from urllib.parse import urlparse
 #: bootstrap, because requests then look like generic OpenAI traffic.
 _MCP_PREFIX = "mcp__"
 _OBSERVE_TOOL = "robotwin_observe"
-_VLA_STEP_TOOL = "robotwin_vla_step"
 _FINISH_TOOL = "finish"
 
 #: Appended verbatim to the end of the prompt when the model has just observed.
@@ -39,9 +36,9 @@ _FINISH_TOOL = "finish"
 #: between acting, correcting and finishing.
 _ACT_NOW_REMINDER = (
     "\n\nCRITICAL RULE: You have ALREADY observed and the observation is in "
-    "your context. You MUST NOT call robotwin_observe again now. Your ONLY "
-    "valid choices are robotwin_vla_step, robotwin_execute_ee, or finish. "
-    "Calling robotwin_observe is a protocol violation."
+    "your context. Do not call robotwin_observe again until a genuinely fresh "
+    "view is needed. Choose the appropriate motion, memory, audit, status, or "
+    "finish tool from the complete offered tool set."
 )
 
 
@@ -138,18 +135,6 @@ def _append_act_now_reminder(payload: dict[str, Any]) -> bool:
     return False
 
 
-def _restrict_to_tool(payload: dict[str, Any], name: str) -> bool:
-    """Keep exactly one named OpenAI function in the request's tool list."""
-    tools = payload.get("tools")
-    if not isinstance(tools, list):
-        return False
-    selected = [tool for tool in tools if _tool_name(tool) == name]
-    if not selected:
-        return False
-    payload["tools"] = selected
-    return True
-
-
 def inject_required_tool_choice(
     body: bytes,
 ) -> tuple[bytes, bool]:
@@ -176,19 +161,17 @@ def inject_required_tool_choice(
         for tool in payload.get("tools", [])
         if (name := _tool_name(tool))
     }
-    observe = available.get(_OBSERVE_TOOL)
-    vla_step = available.get(_VLA_STEP_TOOL)
     history = {_bare_tool_name(name) for name in _message_tool_history(payload)}
 
-    # RoboTwin needs an initial perception/action pair, so the first two turns
-    # are pinned to exactly one tool each. After that the model picks the tool
-    # itself, but ``tool_choice`` stays "required" for the rest of the episode.
+    # Keep every RoboTwin turn profile-neutral: ``required`` guarantees a parseable
+    # structured call, while the prompt decides whether memory, perception, a VLA
+    # chunk, a deterministic primitive, or finish is appropriate.
     #
     # Handing the loop back to "auto" does not work: this model only emits a
     # parseable HYV3 tool call under "required" (see the module docstring).
     # Under "auto" it degenerates into prose -- often a literal "<tool_call>
-    # {...}" string that the SDK never executes -- so the episode stalled after
-    # the bootstrap pair with the simulator frozen until max_turns/timeout.
+    # {...}" string that the SDK never executes, so the simulator can remain frozen
+    # until max_turns or timeout.
     #
     # "required" alone is not enough either: it compels *a* call but not a
     # useful one, and the model then re-observes indefinitely (measured: 98 of
@@ -196,25 +179,13 @@ def inject_required_tool_choice(
     # So when the previous call was an observation, append the act-now rule to
     # the end of the prompt. ``finish`` stays a genuine model choice: it is
     # offered every turn, and once called the harness stops steering.
-    if observe is not None:
-        if _OBSERVE_TOOL not in history and _restrict_to_tool(payload, observe):
-            payload["tool_choice"] = "required"
-        elif (
-            _VLA_STEP_TOOL not in history
-            and vla_step is not None
-            and _restrict_to_tool(payload, vla_step)
-        ):
-            payload["tool_choice"] = "required"
-        elif _FINISH_TOOL in history:
+    if _OBSERVE_TOOL in available:
+        if _FINISH_TOOL in history:
             # The model already chose to finish; stop steering it.
             return body, False
-        else:
-            # Keep the full tool list so the model chooses among observe,
-            # vla_step, execute_ee and finish -- only the "must call a tool"
-            # constraint is imposed.
-            payload["tool_choice"] = "required"
-            if _last_tool_called(payload) == _OBSERVE_TOOL:
-                _append_act_now_reminder(payload)
+        payload["tool_choice"] = "required"
+        if _last_tool_called(payload) == _OBSERVE_TOOL:
+            _append_act_now_reminder(payload)
     else:
         # Non-RoboTwin Harnesses retain the conservative previous behavior:
         # make only their initial MCP request choose a tool, then leave later
@@ -238,13 +209,13 @@ class ToolChoiceProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[tool-choice-proxy] {self.address_string()} {fmt % args}", flush=True)
 
-    def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+    def do_GET(self) -> None:
         self._forward()
 
-    def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+    def do_POST(self) -> None:
         self._forward()
 
-    def do_OPTIONS(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+    def do_OPTIONS(self) -> None:
         self._forward()
 
     def _read_body(self) -> bytes:
