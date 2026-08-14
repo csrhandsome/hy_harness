@@ -17,9 +17,18 @@ import base64
 import dataclasses
 import json
 import queue
-from typing import Any
+from typing import Any, Literal
 
-from pydantic_ai import Agent, BinaryContent, ModelSettings, Tool, ToolReturn
+from pydantic import BaseModel
+from pydantic_ai import (
+    Agent,
+    BinaryContent,
+    ModelRetry,
+    ModelSettings,
+    Tool,
+    ToolOutput,
+    ToolReturn,
+)
 from pydantic_ai.capabilities import ProcessHistory, Thinking
 from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 from pydantic_ai.messages import (
@@ -64,6 +73,13 @@ _MAX_IMAGE_MESSAGES = 4
 
 #: Keep the last N tool-return texts; older ones are stubbed.
 _MAX_RECENT_TOOL_RETURNS = 4
+
+
+class _TerminalDecision(BaseModel):
+    """The only valid structured terminal output for the robot controller."""
+
+    status: Literal["success", "failure"]
+    summary: str
 
 
 class ApiAgentLoop:
@@ -156,15 +172,44 @@ class ApiAgentLoop:
         input_queue: queue.Queue[str | None] | None = None,
     ) -> PlannerResult:
         run_state = _RunState()
+        controller_instruction = (
+            "\n\nPYDANTIC CONTROLLER PROTOCOL: ordinary text is disabled. "
+            "Use one real RoboTwin environment tool at a time, then wait for "
+            "its returned state before choosing another motion. The ordinary "
+            "`finish` tool is not available in this backend. Only when "
+            "`robotwin_status`/a returned action result proves success=true "
+            "or done=true may you invoke the structured "
+            "`robotwin_terminal` output tool. If success=false and done=false, "
+            "you must make another real RoboTwin tool call."
+        )
         agent = Agent(
             self._model,
-            instructions=system_prompt or None,
-            tools=_build_tools(
-                toolkit, no_images=self._no_images, run_state=run_state
+            instructions=(system_prompt or "") + controller_instruction,
+            tools=_build_tools(toolkit, no_images=self._no_images, run_state=run_state),
+            # ToolOutput makes a free-text assistant response invalid. This is
+            # the PydanticAI structured-output contract we need for a robot
+            # controller: terminal intent is machine-readable and validated
+            # against the live environment before the Agent may end.
+            output_type=ToolOutput(
+                _TerminalDecision,
+                name="robotwin_terminal",
+                description=(
+                    "Use only after the live RoboTwin status is terminal. "
+                    "Use status='success' only when benchmark success=true; "
+                    "use status='failure' only when done=true and success=false."
+                ),
+                max_retries=max(3, self._invalid_text_retries),
+                sequential=True,
             ),
             model_settings=_build_model_settings(self._model, self._max_tokens),
             capabilities=_build_capabilities(self._model),
+            # The default PydanticAI output/tool retry budget is one. Local
+            # HyV3 occasionally emits an incomplete or malformed tool call
+            # after a rejected finish; retry inside the same structured loop
+            # rather than abandoning the planner after a single bad turn.
+            retries=max(3, max_turns),
         )
+        _register_terminal_validator(agent, toolkit=toolkit, run_state=run_state)
 
         interactive = input_queue is not None
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
@@ -224,12 +269,16 @@ class ApiAgentLoop:
                         if Agent.is_call_tools_node(node):
                             turns += 1
                             run_turns += 1
+                            run_state.begin_model_turn()
                             response = node.model_response
                             response_message = _serialize_response(response)
                             messages.append(response_message)
                             _log_response(response, run.usage, run_turns, max_turns)
                             _emit_dashboard_response(
-                                self._dashboard, response_message, run.usage, n_tool_calls
+                                self._dashboard,
+                                response_message,
+                                run.usage,
+                                n_tool_calls,
                             )
 
                             async with node.stream(run.ctx) as stream:
@@ -263,7 +312,10 @@ class ApiAgentLoop:
                                                             )
                                                         ),
                                                         "size": len(
-                                                            str(message.get("content") or "")
+                                                            str(
+                                                                message.get("content")
+                                                                or ""
+                                                            )
                                                         ),
                                                     },
                                                 }
@@ -281,18 +333,23 @@ class ApiAgentLoop:
                                 )
                                 break
                             if turns >= max_turns:
-                                logger.info(
-                                    "reached max_turns=%d. Stopping.", max_turns
-                                )
+                                if run_state.finish_result is None:
+                                    last_error = (
+                                        "pydantic-ai planner exhausted "
+                                        f"max_turns={max_turns} without a "
+                                        "validated RoboTwin terminal state"
+                                    )
+                                    logger.warning(last_error)
+                                else:
+                                    logger.info(
+                                        "reached max_turns=%d. Stopping.", max_turns
+                                    )
                                 break
                         elif Agent.is_end_node(node):
                             if run_state.finish_result is not None:
                                 break
                             status = toolkit_status(toolkit)
-                            if (
-                                not interactive
-                                and status_requires_tool_call(status)
-                            ):
+                            if not interactive and status_requires_tool_call(status):
                                 needs_continuation = True
                                 logger.warning(
                                     "model ended turn without a tool call while "
@@ -315,6 +372,12 @@ class ApiAgentLoop:
                 if run_state.finish_result is not None or quit_requested:
                     break
                 if turns >= max_turns:
+                    if last_error is None:
+                        last_error = (
+                            "pydantic-ai planner exhausted "
+                            f"max_turns={max_turns} without a validated "
+                            "RoboTwin terminal state"
+                        )
                     break
                 if needs_continuation:
                     status = toolkit_status(toolkit) or {}
@@ -347,7 +410,8 @@ class ApiAgentLoop:
                 seed = nxt
                 messages.append({"role": "user", "content": seed})
         except UsageLimitExceeded as e:
-            logger.info("usage limit reached: %s", e)
+            last_error = f"pydantic-ai usage limit reached: {e}"
+            logger.info(last_error)
         except Exception as e:  # noqa: BLE001 - surfaced via PlannerResult.error
             last_error = f"{type(e).__name__}: {e}"
             if _is_image_rejection(e) and not self._no_images:
@@ -362,6 +426,8 @@ class ApiAgentLoop:
         stats = _build_stats(usage, turns, n_tool_calls)
         stats["backend"] = "pydantic_ai"
         stats["invalid_terminal_retries"] = run_state.invalid_terminal_retries
+        stats["structured_terminal_attempts"] = run_state.terminal_attempts
+        stats["structured_terminal_rejections"] = run_state.terminal_rejections
         return PlannerResult(
             finish_result=run_state.finish_result,
             messages=messages,
@@ -376,10 +442,86 @@ class _RunState:
 
     finish_result: dict[str, Any] | None = None
     invalid_terminal_retries: int = 0
+    terminal_attempts: int = 0
+    terminal_rejections: int = 0
+    environment_tool_this_turn: str | None = None
+
+    def begin_model_turn(self) -> None:
+        """Allow one environment operation in the next model response."""
+        self.environment_tool_this_turn = None
+
+
+def _register_terminal_validator(
+    agent: Agent,
+    *,
+    toolkit: BaseTool,
+    run_state: _RunState,
+) -> None:
+    """Accept a structured terminal output only at an environment terminal.
+
+    ``ToolOutput`` removes free-text exits, but its schema alone cannot know
+    whether a model's claimed completion matches the simulator. The validator
+    makes the simulator authoritative and returns a Pydantic ``ModelRetry``
+    when the model tries to end a live episode.
+    """
+
+    @agent.output_validator
+    async def _validate_terminal(decision: _TerminalDecision) -> _TerminalDecision:
+        run_state.terminal_attempts += 1
+        status = toolkit_status(toolkit) or {}
+        success = bool(status.get("success"))
+        done = bool(status.get("done"))
+        if success:
+            if decision.status != "success":
+                run_state.terminal_rejections += 1
+                raise ModelRetry(
+                    "RoboTwin reports success=true. Invoke robotwin_terminal "
+                    "with status='success'."
+                )
+            run_state.finish_result = {
+                "_finish": True,
+                "status": "success",
+                "summary": decision.summary,
+                **status,
+            }
+            return decision
+        if done:
+            if decision.status != "failure":
+                run_state.terminal_rejections += 1
+                raise ModelRetry(
+                    "RoboTwin reports done=true and success=false. Invoke "
+                    "robotwin_terminal with status='failure'."
+                )
+            run_state.finish_result = {
+                "_finish": True,
+                "status": "failure",
+                "summary": decision.summary,
+                **status,
+            }
+            return decision
+
+        run_state.terminal_rejections += 1
+        count = status.get("take_action_cnt")
+        limit = status.get("step_lim")
+        budget = (
+            f" Current simulator actions: {count}/{limit}."
+            if count is not None and limit is not None
+            else ""
+        )
+        raise ModelRetry(
+            "INVALID TERMINATION: RoboTwin is still active "
+            "(success=false, done=false). Do not terminate or write prose."
+            f"{budget} Call one real RoboTwin environment tool now."
+        )
 
 
 def _build_capabilities(model: Model) -> list[Any]:
-    capabilities: list[Any] = [ProcessHistory(processor=_prune_history)]
+    # pydantic-ai dispatches synchronous ProcessHistory processors through an
+    # AnyIO worker thread. In the RoboTwin Python 3.10 runtime that path can
+    # stall an Agent run before its first model request. Keep the pruning logic
+    # synchronous and deterministic, but expose it through an async wrapper so
+    # pydantic-ai runs it directly in the event loop.
+    capabilities: list[Any] = [ProcessHistory(processor=_async_prune_history)]
     if _is_anthropic_model(model):
         capabilities.insert(0, Thinking(effort="high"))
     return capabilities
@@ -411,6 +553,11 @@ def _prune_history(messages: list[ModelMessage]) -> list[ModelMessage]:
     """Drop old camera images and stub old tool returns to bound request size."""
     pruned = _prune_history_images(messages)
     return _stub_old_tool_returns(pruned)
+
+
+async def _async_prune_history(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """Async adapter for pydantic-ai's ProcessHistory capability."""
+    return _prune_history(messages)
 
 
 def _prune_history_images(messages: list[ModelMessage]) -> list[ModelMessage]:
@@ -446,19 +593,14 @@ def _prune_history_images(messages: list[ModelMessage]) -> list[ModelMessage]:
     total = 0
     for rank, mi in enumerate(reversed(image_messages)):
         nbytes = bytes_by_message[mi]
-        if (
-            rank < _MIN_IMAGE_MESSAGES
-            or (
-                len(keep_messages) < _MAX_IMAGE_MESSAGES
-                and total + nbytes <= _MAX_HISTORY_IMAGE_BYTES
-            )
+        if rank < _MIN_IMAGE_MESSAGES or (
+            len(keep_messages) < _MAX_IMAGE_MESSAGES
+            and total + nbytes <= _MAX_HISTORY_IMAGE_BYTES
         ):
             keep_messages.add(mi)
             total += nbytes
 
-    keep_items = {
-        (mi, pi, ii) for mi, pi, ii, _ in located if mi in keep_messages
-    }
+    keep_items = {(mi, pi, ii) for mi, pi, ii, _ in located if mi in keep_messages}
     if len(keep_items) == len(located):
         return messages
 
@@ -516,7 +658,7 @@ def _stub_old_tool_returns(messages: list[ModelMessage]) -> list[ModelMessage]:
     if len(located) <= _MAX_RECENT_TOOL_RETURNS:
         return messages
 
-    drop = set(located[: -_MAX_RECENT_TOOL_RETURNS])
+    drop = set(located[:-_MAX_RECENT_TOOL_RETURNS])
     placeholder = "[earlier tool result omitted to bound request size]"
     new_messages = list(messages)
     for mi, pi in drop:
@@ -549,6 +691,12 @@ def _build_tools(
     tools: list[Tool] = []
     for spec in toolkit.get_tools_description():
         name = spec["name"]
+        # ``robotwin_terminal`` is the sole terminal interface for this
+        # backend. Keeping the legacy free-form ``finish`` function would
+        # give the model two competing exit paths and reintroduce an
+        # unstructured status/summary decision.
+        if name == "finish":
+            continue
         tools.append(
             Tool.from_schema(
                 function=_make_tool_function(
@@ -559,6 +707,11 @@ def _build_tools(
                 json_schema=spec.get("input_schema")
                 or {"type": "object", "properties": {}},
                 takes_ctx=False,
+                # The model must see each tool result before selecting the
+                # next operation. This both serializes real simulator
+                # actions and prevents a single response from committing to
+                # observe/action chains based on stale perception.
+                sequential=True,
             )
         )
     return tools
@@ -573,7 +726,14 @@ def _make_tool_function(
 ):
     """Return a callable that dispatches one tool call to the toolkit."""
 
-    def _call(**kwargs: Any) -> Any:
+    async def _call(**kwargs: Any) -> Any:
+        if run_state.environment_tool_this_turn is not None:
+            raise ModelRetry(
+                "Only one RoboTwin tool is allowed per assistant turn. "
+                f"{run_state.environment_tool_this_turn!r} already ran and "
+                "returned fresh state; choose the next tool in a new turn."
+            )
+        run_state.environment_tool_this_turn = name
         result = toolkit.execute_tool(name, kwargs)
         if result.is_finish and run_state.finish_result is None:
             # Only the tool result may terminate the loop. A rejected

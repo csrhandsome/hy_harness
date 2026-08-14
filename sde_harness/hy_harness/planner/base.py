@@ -153,7 +153,7 @@ def _build_api_planner(
     from pydantic_ai.models import infer_model
     from pydantic_ai.providers import infer_provider, infer_provider_class
 
-    from sde_harness.hy_harness.planner.pydantic_loop import ApiAgentLoop
+    from hy_harness.planner.pydantic_loop import ApiAgentLoop
     from hy_harness.utils.config import load_local_env
 
     load_local_env()

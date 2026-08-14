@@ -50,6 +50,22 @@ def _is_mcp_tool(name: str) -> bool:
     return name.startswith(_MCP_PREFIX) and name.count("__") >= 2
 
 
+def _is_harness_tool(name: str) -> bool:
+    """Return whether a function belongs to the embedded Harness toolkit.
+
+    CodeBuddy namespaces MCP tools as ``mcp__hyharness__robotwin_*`` while
+    pydantic-ai forwards the same schemas as ordinary OpenAI function names
+    (``robotwin_*``). Both transports require the proxy's required-tool policy.
+    """
+    bare_name = _bare_tool_name(name) if _is_mcp_tool(name) else name
+    return bare_name.startswith("robotwin_") or bare_name in {
+        "finish",
+        "read_text_file",
+        "write_text_file",
+        "list_dir",
+    }
+
+
 def _bare_tool_name(name: str) -> str:
     """Return the tool name without its ``mcp__<server>__`` namespace."""
     if not _is_mcp_tool(name):
@@ -66,7 +82,9 @@ def _has_harness_tool(payload: dict[str, Any]) -> bool:
         if not isinstance(tool, dict):
             continue
         function = tool.get("function")
-        if isinstance(function, dict) and _is_mcp_tool(str(function.get("name", ""))):
+        if isinstance(function, dict) and _is_harness_tool(
+            str(function.get("name", ""))
+        ):
             return True
     return False
 
@@ -135,7 +153,7 @@ def _harness_tool_calls_by_id(payload: dict[str, Any]) -> dict[str, str]:
                 continue
             call_id = call.get("id")
             name = _tool_name(call)
-            if isinstance(call_id, str) and _is_mcp_tool(name):
+            if isinstance(call_id, str) and _is_harness_tool(name):
                 calls[call_id] = _bare_tool_name(name)
     return calls
 

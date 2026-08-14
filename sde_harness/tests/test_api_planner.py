@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any
 
@@ -19,9 +20,10 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from sde_harness.hy_harness.planner.pydantic_loop import (
+from hy_harness.planner.pydantic_loop import (
     ApiAgentLoop,
     _RunState,
+    _build_tools,
     _content_blocks_to_pydantic,
     _make_tool_function,
     _prune_history,
@@ -146,11 +148,12 @@ def test_tool_wrapper_confirms_finish_only_from_tool_result() -> None:
     toolkit = _RobotToolkit()
     state = _RunState()
     finish = _make_tool_function(toolkit, "finish", no_images=True, run_state=state)
-    rejected = finish(status="success", summary="hallucinated")
+    rejected = asyncio.run(finish(status="success", summary="hallucinated"))
     assert state.finish_result is None
     assert "error" in rejected
 
-    confirmed = finish(status="stuck", summary="cannot recover")
+    state.begin_model_turn()
+    confirmed = asyncio.run(finish(status="stuck", summary="cannot recover"))
     assert state.finish_result is not None
     assert state.finish_result["_finish"] is True
     assert state.finish_result["status"] == "stuck"
@@ -163,7 +166,7 @@ def test_tool_wrapper_returns_images_as_binary_content() -> None:
     observe = _make_tool_function(
         toolkit, "robotwin_observe", no_images=False, run_state=state
     )
-    returned = observe()
+    returned = asyncio.run(observe())
     assert isinstance(returned, ToolReturn)
     assert any(isinstance(item, BinaryContent) for item in returned.content)
 
@@ -210,10 +213,24 @@ def test_prune_history_keeps_latest_observe_and_stubs_old_tool_returns() -> None
     assert stubbed == 2
 
 
-def test_prose_does_not_end_loop_until_retries_exhausted() -> None:
+def test_build_tools_hides_legacy_finish_and_serializes_environment_calls() -> None:
+    toolkit = _RobotToolkit()
+    tools = _build_tools(toolkit, no_images=True, run_state=_RunState())
+    assert {tool.name for tool in tools} == {
+        "read_text_file",
+        "write_text_file",
+        "list_dir",
+        "robotwin_observe",
+    }
+    assert all(tool.sequential for tool in tools)
+
+
+def test_prose_is_not_a_terminal_output_and_consumes_the_request_budget() -> None:
     toolkit = _RobotToolkit()
 
-    def model_function(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+    async def model_function(
+        messages: list[ModelMessage], _info: AgentInfo
+    ) -> ModelResponse:
         return ModelResponse(parts=[TextPart("the task failed, giving up")])
 
     result = ApiAgentLoop(
@@ -227,29 +244,23 @@ def test_prose_does_not_end_loop_until_retries_exhausted() -> None:
     )
     assert result.finish_result is None
     assert result.error is not None
-    assert "non-terminal text" in result.error
-    assert result.stats["invalid_terminal_retries"] == 2
-    assert any(
-        "INVALID TERMINATION" in str(message.get("content", ""))
-        for message in result.messages
-        if message.get("role") == "user"
-    )
+    assert "exhausted max_turns" in result.error
+    assert result.stats["turns_used"] == 8
+    assert result.stats["tool_calls"] == 0
+    assert toolkit.calls == []
 
 
-def test_continuation_recovers_into_tool_call_then_confirmed_finish() -> None:
-    toolkit = _RobotToolkit()
+def test_structured_terminal_is_accepted_only_when_environment_is_done() -> None:
+    toolkit = _RobotToolkit(done=True)
 
-    def model_function(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
-        n_responses = _n_model_responses(messages)
-        if n_responses == 0:
-            return ModelResponse(parts=[TextPart("I think we are done.")])
-        if n_responses == 1:
-            return ModelResponse(parts=[ToolCallPart("robotwin_observe", {})])
+    async def model_function(
+        messages: list[ModelMessage], _info: AgentInfo
+    ) -> ModelResponse:
         return ModelResponse(
             parts=[
                 ToolCallPart(
-                    "finish",
-                    {"status": "stuck", "summary": "cannot recover"},
+                    "robotwin_terminal",
+                    {"status": "failure", "summary": "simulator budget exhausted"},
                 )
             ]
         )
@@ -266,31 +277,22 @@ def test_continuation_recovers_into_tool_call_then_confirmed_finish() -> None:
     assert result.error is None
     assert result.finish_result is not None
     assert result.finish_result["_finish"] is True
-    assert result.finish_result["status"] == "stuck"
-    assert result.stats["invalid_terminal_retries"] == 1
-    assert "observe" in toolkit.calls
-    assert "finish:stuck" in toolkit.calls
+    assert result.finish_result["status"] == "failure"
+    assert result.stats["structured_terminal_attempts"] == 1
+    assert result.stats["structured_terminal_rejections"] == 0
 
 
-def test_rejected_finish_does_not_stop_pydantic_loop() -> None:
+def test_structured_terminal_is_rejected_while_environment_remains_active() -> None:
     toolkit = _RobotToolkit()
 
-    def model_function(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
-        n_responses = _n_model_responses(messages)
-        if n_responses == 0:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "finish",
-                        {"status": "success", "summary": "hallucinated"},
-                    )
-                ]
-            )
+    async def model_function(
+        messages: list[ModelMessage], _info: AgentInfo
+    ) -> ModelResponse:
         return ModelResponse(
             parts=[
                 ToolCallPart(
-                    "finish",
-                    {"status": "stuck", "summary": "cannot recover"},
+                    "robotwin_terminal",
+                    {"status": "failure", "summary": "gave up"},
                 )
             ]
         )
@@ -304,8 +306,12 @@ def test_rejected_finish_does_not_stop_pydantic_loop() -> None:
         toolkit=toolkit,
         max_turns=6,
     )
-    assert result.error is None
-    assert toolkit.calls == ["finish:success", "finish:stuck"]
-    assert result.finish_result is not None
-    assert result.finish_result["status"] == "stuck"
-    assert result.finish_result["_finish"] is True
+    assert result.finish_result is None
+    assert result.error is not None
+    assert "Exceeded maximum output retries" in result.error
+    assert toolkit.calls == []
+    assert result.stats["structured_terminal_attempts"] >= 2
+    assert (
+        result.stats["structured_terminal_rejections"]
+        == result.stats["structured_terminal_attempts"]
+    )

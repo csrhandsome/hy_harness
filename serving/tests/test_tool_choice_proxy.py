@@ -41,6 +41,48 @@ def _body(
 
 
 class ToolChoiceProxyTests(unittest.TestCase):
+    def test_bare_pydantic_robotwin_tools_get_required_and_rehydrated(self) -> None:
+        import json
+
+        body, changed = inject_required_tool_choice(
+            _body(
+                tool_names=["robotwin_observe", "robotwin_vla_chunk"],
+                history=[
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "observe",
+                                "type": "function",
+                                "function": {"name": "robotwin_observe"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "observe",
+                        "content": json.dumps(
+                            {
+                                "content": [
+                                    {"type": "text", "text": '{"success": false}'},
+                                    {"type": "image", "image": "YWJj"},
+                                ]
+                            }
+                        ),
+                    },
+                ],
+            )
+        )
+
+        self.assertTrue(changed)
+        payload = json.loads(body)
+        self.assertEqual(payload["tool_choice"], "required")
+        observation = payload["messages"][-1]
+        self.assertEqual(observation["role"], "user")
+        self.assertTrue(
+            any(item.get("type") == "image_url" for item in observation["content"])
+        )
+
     def test_invalid_termination_retry_is_forced_to_fresh_vla_chunk(self) -> None:
         import json
 
