@@ -66,8 +66,37 @@ logger = get_logger("api_loop")
 _TEXT_LOG_LIMIT = 500
 _ARGS_LOG_LIMIT = 250
 _TOOL_LOG_LIMIT = 350
-_HIDDEN_TOOLS = frozenset({"finish", "write_text_file"})
-_HISTORY_ERROR_RETRIES = 1
+_HIDDEN_TOOLS = frozenset({"finish", "write_text_file", "robotwin_execute_ee"})
+_HISTORY_ERROR_RETRIES = 2
+_FILE_LOOKUP_TOOLS = frozenset({"read_text_file", "list_dir"})
+_PASSIVE_TOOLS = _FILE_LOOKUP_TOOLS | {"robotwin_observe", "robotwin_status"}
+_MOTION_TOOLS = frozenset(
+    {
+        "robotwin_vla_chunk",
+        "robotwin_move_arm",
+        "robotwin_translate_arm",
+        "robotwin_move_bimanual",
+        "robotwin_rotate_arm",
+        "robotwin_set_gripper",
+        "robotwin_release",
+        "robotwin_hold",
+    }
+)
+
+# The RoboTwin prompt asks for the index plus at most two relevant leaves.
+# Allow one extra directory listing, then force the model back to perception
+# and physical control instead of letting it burn an episode guessing paths.
+_MAX_FILE_LOOKUP_CALLS = 4
+
+# Every action result already includes a fresh state, status and three camera
+# views. Re-observing without an intervening external change just inflates the
+# multimodal transcript and was the main trigger for local-vLLM 32k overflows.
+_MAX_OBSERVE_CALLS = 1
+
+# A controller may consult memory and status before it moves, but repeated
+# passive requests add tool-call transcript without changing the environment.
+# After this many consecutive passive requests it must execute a real motion.
+_MAX_CONSECUTIVE_PASSIVE_TOOLS = 6
 
 
 class _TerminalDecision(BaseModel):
@@ -262,6 +291,7 @@ class ApiAgentLoop:
             while True:
                 run_turns = 0
                 needs_continuation = False
+                run: Any | None = None
                 try:
                     async with agent.iter(
                         seed,
@@ -379,6 +409,16 @@ class ApiAgentLoop:
                         usage = run.usage
                         history = run.all_messages()
                 except ModelHTTPError as e:
+                    # A request can fail while ``agent.iter`` is advancing to
+                    # its next model node. In that case the assignment after
+                    # the context manager is never reached, even though the
+                    # live run already contains valid user/tool history that
+                    # can be compacted. Recover it before deciding whether a
+                    # bounded retry is possible.
+                    if run is not None:
+                        partial_history = run.all_messages()
+                        if partial_history:
+                            history = partial_history
                     if (
                         history
                         and history_error_retries < _HISTORY_ERROR_RETRIES
@@ -460,6 +500,10 @@ class ApiAgentLoop:
         stats["structured_terminal_attempts"] = run_state.terminal_attempts
         stats["structured_terminal_rejections"] = run_state.terminal_rejections
         stats["history_error_retries"] = history_error_retries
+        stats["file_lookup_calls"] = run_state.file_lookup_calls
+        stats["file_lookup_rejections"] = run_state.file_lookup_rejections
+        stats["passive_tool_calls"] = run_state.passive_tool_calls
+        stats["passive_tool_rejections"] = run_state.passive_tool_rejections
         return PlannerResult(
             finish_result=run_state.finish_result,
             messages=messages,
@@ -477,6 +521,12 @@ class _RunState:
     terminal_attempts: int = 0
     terminal_rejections: int = 0
     environment_tool_this_turn: str | None = None
+    file_lookup_calls: int = 0
+    file_lookup_rejections: int = 0
+    observe_calls: int = 0
+    observe_rejections: int = 0
+    passive_tool_calls: int = 0
+    passive_tool_rejections: int = 0
 
     def begin_model_turn(self) -> None:
         """Allow one environment operation in the next model response."""
@@ -623,9 +673,20 @@ def _build_tools(
     no_images: bool,
     run_state: _RunState,
 ) -> list[Tool]:
-    """Wrap the HyHarness toolkit as pydantic-ai function tools."""
+    """Wrap the HyHarness toolkit as pydantic-ai function tools.
+
+    Tool visibility is evaluated before every model request. Once the initial
+    memory/observation budget is consumed, we remove passive tools from the
+    schema instead of repeatedly returning ``ModelRetry`` after the model
+    chooses them. This keeps the backend-facing function schema compact and
+    makes a physical control action the only available next decision.
+    """
+    specs = toolkit.get_tools_description()
+    robotwin_vla_controller = any(
+        spec.get("name") == "robotwin_vla_chunk" for spec in specs
+    )
     tools: list[Tool] = []
-    for spec in toolkit.get_tools_description():
+    for spec in specs:
         name = spec["name"]
         # ``robotwin_terminal`` is the sole terminal interface for this
         # backend. ``finish`` would reintroduce an unstructured exit, and
@@ -633,24 +694,63 @@ def _build_tools(
         # the audit and recipe when the session ends.
         if name in _HIDDEN_TOOLS:
             continue
-        tools.append(
-            Tool.from_schema(
-                function=_make_tool_function(
-                    toolkit, name, no_images=no_images, run_state=run_state
-                ),
-                name=name,
-                description=spec.get("description", ""),
-                json_schema=spec.get("input_schema")
-                or {"type": "object", "properties": {}},
-                takes_ctx=False,
-                # The model must see each tool result before selecting the
-                # next operation. This both serializes real simulator
-                # actions and prevents a single response from committing to
-                # observe/action chains based on stale perception.
-                sequential=True,
-            )
+        tool = Tool.from_schema(
+            function=_make_tool_function(
+                toolkit, name, no_images=no_images, run_state=run_state
+            ),
+            name=name,
+            description=spec.get("description", ""),
+            json_schema=spec.get("input_schema")
+            or {"type": "object", "properties": {}},
+            takes_ctx=False,
+            # The model must see each tool result before selecting the next
+            # operation. This serializes stateful simulator actions.
+            sequential=True,
         )
+        tool.prepare = _prepare_robotwin_tool(
+            name,
+            run_state,
+            robotwin_vla_controller=robotwin_vla_controller,
+        )
+        tools.append(tool)
     return tools
+
+
+def _prepare_robotwin_tool(
+    name: str,
+    run_state: _RunState,
+    *,
+    robotwin_vla_controller: bool,
+):
+    """Hide exhausted passive tools before the model sees the schema."""
+
+    async def _prepare(_ctx: Any, tool_def: Any) -> Any:
+        if robotwin_vla_controller:
+            # The live RoboTwin action result always returns authoritative
+            # status plus all three camera images. A closed-loop Hy-VLA
+            # controller therefore needs exactly one bootstrap observation,
+            # then fresh VLA chunks until the structured terminal validator
+            # sees done/success. Exposing file I/O, status polling, raw EE,
+            # and speculative primitives lets the local model create long
+            # non-moving tool transcripts that its HYV3 parser later rejects.
+            if run_state.observe_calls == 0:
+                return tool_def if name == "robotwin_observe" else None
+            return tool_def if name == "robotwin_vla_chunk" else None
+        if name in _FILE_LOOKUP_TOOLS and (
+            run_state.file_lookup_calls >= _MAX_FILE_LOOKUP_CALLS
+        ):
+            return None
+        if name == "robotwin_observe" and (
+            run_state.observe_calls >= _MAX_OBSERVE_CALLS
+        ):
+            return None
+        # Once a physical action has occurred, repeated status polling has no
+        # new visual information; each motion result already includes status.
+        if name == "robotwin_status" and run_state.passive_tool_calls >= 2:
+            return None
+        return tool_def
+
+    return _prepare
 
 
 def _make_tool_function(
@@ -669,15 +769,71 @@ def _make_tool_function(
                 f"{run_state.environment_tool_this_turn!r} already ran and "
                 "returned fresh state; choose the next tool in a new turn."
             )
+        if name in _FILE_LOOKUP_TOOLS:
+            if run_state.file_lookup_calls >= _MAX_FILE_LOOKUP_CALLS:
+                run_state.file_lookup_rejections += 1
+                raise ModelRetry(
+                    "The RoboTwin memory lookup budget is exhausted. Do not "
+                    "guess more file paths or call list_dir again. Call "
+                    "robotwin_observe if needed, then execute a real "
+                    "RoboTwin motion tool."
+                )
+            run_state.file_lookup_calls += 1
+        if name == "robotwin_observe":
+            if run_state.observe_calls >= _MAX_OBSERVE_CALLS:
+                run_state.observe_rejections += 1
+                raise ModelRetry(
+                    "The initial RoboTwin observation and every completed "
+                    "motion result already provide fresh three-view imagery. "
+                    "Do not call robotwin_observe again; choose a real "
+                    "RoboTwin motion tool using the latest result."
+                )
+            run_state.observe_calls += 1
+        if name in _PASSIVE_TOOLS:
+            if run_state.passive_tool_calls >= _MAX_CONSECUTIVE_PASSIVE_TOOLS:
+                run_state.passive_tool_rejections += 1
+                raise ModelRetry(
+                    "Too many consecutive memory/status/observation calls "
+                    "without changing RoboTwin. The latest state is already "
+                    "available; call a physical RoboTwin motion tool now."
+                )
+            run_state.passive_tool_calls += 1
+        else:
+            run_state.passive_tool_calls = 0
         run_state.environment_tool_this_turn = name
         result = toolkit.execute_tool(name, kwargs)
+        if name in _MOTION_TOOLS and isinstance(result.result, dict):
+            error = result.result.get("error")
+            if error:
+                # Do not append a large traceback from a malformed primitive
+                # call to the model transcript. It does not change the live
+                # environment and has no value as history; make the retry
+                # short and force a valid next control decision instead.
+                raise ModelRetry(
+                    f"{name} was rejected: {error}. The robot did not move. "
+                    "Do not repeat the malformed primitive; use valid "
+                    "arguments or call robotwin_vla_chunk for the next "
+                    "physical action."
+                )
         if result.is_finish and run_state.finish_result is None:
             # Only the tool result may terminate the loop. A rejected
             # finish returns error without ``_finish`` and is ignored here.
             run_state.finish_result = dict(result.result)
         text, images = _content_blocks_to_pydantic(result.content_blocks)
         if images and not no_images:
-            return ToolReturn(return_value=text, content=images)
+            # ``return_value`` remains the protocol-correct tool result.
+            # ``content`` creates a following user-visible multimodal state
+            # message for OpenAI-compatible models. Keep the text state and
+            # all three RoboTwin camera images in the same bundle so a
+            # backend-side history projection can retain one complete live
+            # observation without separating cameras from their state.
+            return ToolReturn(
+                return_value=text,
+                content=[
+                    f"Latest live RoboTwin result from {name}:\n{text}",
+                    *images,
+                ],
+            )
         return text
 
     _call.__name__ = name

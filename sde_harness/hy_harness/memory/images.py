@@ -15,12 +15,22 @@ from pydantic_ai.messages import ModelMessage
 #: Cap on cumulative decoded image bytes kept in the resent request history.
 MAX_HISTORY_IMAGE_BYTES = 4 * 1024 * 1024
 
-#: Always keep every image from at least this many most-recent camera
-#: messages (one RoboTwin observe is three RGB frames).
-MIN_IMAGE_MESSAGES = 1
+#: A RoboTwin camera observation is an inseparable **three-image bundle**:
+#: head, left wrist and right wrist. Never retain one camera while dropping
+#: its siblings; we only bound how many *complete observation bundles* appear
+#: in resend history.
+IMAGES_PER_ROBOTWIN_OBSERVATION = 3
 
-#: Drop images from older observations beyond this many camera messages.
-MAX_IMAGE_MESSAGES = 4
+#: Always keep every image from at least this many most-recent observation
+#: bundles. ``1`` means all three images from the newest observation, not one
+#: image.
+MIN_IMAGE_OBSERVATIONS = 1
+
+#: Drop image bundles from older observations beyond this many complete
+#: observations. The local Hy-Embodied vLLM service has a 32k context; one
+#: latest three-view bundle leaves room for system instructions, schemas and
+#: the latest state text without breaking camera completeness.
+MAX_IMAGE_OBSERVATIONS = 1
 
 _IMAGE_PLACEHOLDER = "[earlier camera image omitted to bound request size]"
 
@@ -54,8 +64,8 @@ def prune_history_images(messages: list[ModelMessage]) -> list[ModelMessage]:
     total = 0
     for rank, mi in enumerate(reversed(image_messages)):
         nbytes = bytes_by_message[mi]
-        if rank < MIN_IMAGE_MESSAGES or (
-            len(keep_messages) < MAX_IMAGE_MESSAGES
+        if rank < MIN_IMAGE_OBSERVATIONS or (
+            len(keep_messages) < MAX_IMAGE_OBSERVATIONS
             and total + nbytes <= MAX_HISTORY_IMAGE_BYTES
         ):
             keep_messages.add(mi)

@@ -11,9 +11,10 @@ PROMPT_PROFILES = (PRIMITIVE_FIRST, VLA_FIRST)
 _COMMON: PromptNode = {
     "ROLE": "You are a careful vision-language planner controlling a live RoboTwin bimanual task.",
     "MEMORY_AND_REFERENCES": (
-        "Before moving, use read_text_file on {{memory_dir}}/MEMORY.md. Follow its index and read "
-        "only 2-3 relevant leaf notes. If {{reference_dir}} exists, inspect only references matching "
-        "this task. Memory and references are read-only evidence, never a substitute for the live view."
+        "File lookup is optional and may be unavailable in the compact API controller. If read_text_file "
+        "is offered, its only initial index is {{memory_dir}}/MEMORY.md; follow at most two relevant "
+        "leaves and never guess alternate paths. If file tools are unavailable, proceed directly to the "
+        "live observation. Memory and references are read-only evidence, never a substitute for the live view."
     ),
     "OBSERVATION": (
         "Call robotwin_observe once after memory retrieval. Every motion tool returns the new state, "
@@ -45,10 +46,8 @@ _COMMON: PromptNode = {
     "ARTIFACTS": (
         "The runner automatically exports the physics-only action recipe to {{recipe_path}} and persists a "
         "fallback audit. Do not write an audit, summary, or report while success=false and done=false: keep "
-        "controlling the robot instead. Only at terminal status (success=true or done=true) write "
-        "{{audit_path}} with write_text_file as one JSON object containing task, test_num, prompt_profile, "
-        "memory_files_read, strategy, outcome, benchmark_success, final_status, vla_chunks_used, "
-        "primitive_calls_used, and failure_reason. Do not edit global memory during an episode."
+        "controlling the robot instead. The compact API controller does not expose write_text_file; the "
+        "runner persists {{audit_path}} automatically at session end. Do not edit global memory during an episode."
     ),
 }
 
@@ -95,7 +94,13 @@ def user_prompt() -> PromptNode:
             "prompt_profile: {{prompt_profile}}\n"
             "output_dir: {{output_dir}}"
         ),
-        "BEGIN": "Read the indexed memory first, then obtain one live observation and execute the task.",
+        "BEGIN": (
+            "If read_text_file is available, it may read only {{memory_dir}}/MEMORY.md "
+            "and at most two leaves named by that index. Otherwise, or after "
+            "that small lookup budget, call robotwin_observe once. Then use "
+            "fresh robotwin_vla_chunk actions; each completed action already "
+            "returns the next three-camera observation and status."
+        ),
     }
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
@@ -33,6 +34,7 @@ _RECOVERY_TOOL = "robotwin_vla_chunk"
 _FINISH_TOOL = "finish"
 _INVALID_TERMINATION_MARKER = "INVALID TERMINATION:"
 _MULTIMODAL_ENVELOPE_KEY = "_hyharness_multimodal"
+_DEBUG_LOG_ENV = "HY_HARNESS_PROXY_DEBUG_LOG"
 
 #: Appended verbatim to the end of the prompt when the model has just observed.
 #: Kept as prose (not a tool-list restriction) so the model still chooses
@@ -44,10 +46,80 @@ _ACT_NOW_REMINDER = (
     "finish tool from the complete offered tool set."
 )
 
+# A RoboTwin tool result includes one complete three-camera bundle. We retain
+# the newest bundle in the backend-facing prompt, never a partial set of
+# cameras. Earlier turns are projected away below rather than replayed as
+# malformed/unbounded OpenAI tool-call history.
+_MAX_VISIBLE_TOOL_RESULTS = 1
+
 
 def _is_mcp_tool(name: str) -> bool:
     """Return whether an OpenAI function name is MCP-namespaced."""
     return name.startswith(_MCP_PREFIX) and name.count("__") >= 2
+
+
+def _write_debug_snapshot(
+    *,
+    request_body: bytes,
+    response_status: int | None = None,
+    response_body: bytes | None = None,
+) -> None:
+    """Append a bounded proxy diagnostic record when explicitly requested.
+
+    This is intentionally opt-in and omits base64 image data. It is useful for
+    distinguishing backend tool-schema parse errors from oversized message
+    history without retaining the full multimodal request.
+    """
+    path = os.environ.get(_DEBUG_LOG_ENV)
+    if not path:
+        return
+    try:
+        payload = json.loads(request_body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = {}
+
+    messages: list[dict[str, Any]] = []
+    for message in payload.get("messages", []) if isinstance(payload, dict) else []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            summary = {"text_chars": len(content), "image_blocks": 0}
+        elif isinstance(content, list):
+            summary = {
+                "text_chars": sum(
+                    len(str(item.get("text", "")))
+                    for item in content
+                    if isinstance(item, dict)
+                ),
+                "image_blocks": sum(
+                    1
+                    for item in content
+                    if isinstance(item, dict)
+                    and item.get("type") in {"image", "image_url"}
+                ),
+            }
+        else:
+            summary = {"text_chars": 0, "image_blocks": 0}
+        messages.append({"role": message.get("role"), **summary})
+
+    tools = payload.get("tools", []) if isinstance(payload, dict) else []
+    record: dict[str, Any] = {
+        "response_status": response_status,
+        "message_summary": messages,
+        "tool_names": [_tool_name(tool) for tool in tools if isinstance(tool, dict)],
+        "tools_json_chars": len(json.dumps(tools, ensure_ascii=False)),
+        "tool_choice": payload.get("tool_choice")
+        if isinstance(payload, dict)
+        else None,
+    }
+    if response_body is not None:
+        record["response"] = response_body.decode("utf-8", errors="replace")[:20_000]
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _is_harness_tool(name: str) -> bool:
@@ -126,12 +198,18 @@ def _is_invalid_termination_retry(payload: dict[str, Any]) -> bool:
     if not isinstance(messages, list):
         return False
     # The continuation marker remains in CodeBuddy's replayed history. Only
-    # force the recovery VLA tool when that marker is the *latest* user turn;
-    # later tool-result messages must restore the full RoboTwin tool set.
+    # force the recovery VLA tool when that marker is the *latest protocol
+    # event*. A later assistant call or tool result means recovery has already
+    # resumed, so restore the full RoboTwin tool set instead of re-forcing a
+    # VLA chunk from stale history.
     for message in reversed(messages):
-        if not isinstance(message, dict) or message.get("role") != "user":
+        if not isinstance(message, dict):
             continue
-        return _contains_invalid_termination_marker(message.get("content"))
+        role = message.get("role")
+        if role == "user":
+            return _contains_invalid_termination_marker(message.get("content"))
+        if role in {"assistant", "tool"}:
+            return False
     return False
 
 
@@ -275,8 +353,8 @@ def _prune_stale_harness_tool_results(payload: dict[str, Any]) -> bool:
     Every RoboTwin action returns three RGB views. Replaying all historical
     tool results into a continuation request would quickly exceed the model
     context window. The chat template ignores assistant/tool history, so keep
-    only the four newest user-visible tool results: they contain the current
-    state and images needed for the next decision.
+    only the newest user-visible tool result: it contains the current state
+    and images needed for the next decision.
     """
     messages = payload.get("messages")
     if not isinstance(messages, list):
@@ -298,12 +376,95 @@ def _prune_stale_harness_tool_results(payload: dict[str, Any]) -> bool:
             continue
         result_indexes.append(index)
 
-    stale = set(result_indexes[:-4])
+    stale = set(result_indexes[:-_MAX_VISIBLE_TOOL_RESULTS])
     if not stale:
         return False
     messages[:] = [
         message for index, message in enumerate(messages) if index not in stale
     ]
+    return True
+
+
+def _is_rehydrated_tool_result(message: Any) -> bool:
+    """Return whether *message* is the user-visible form of a tool result."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    first = content[0]
+    return (
+        isinstance(first, dict)
+        and isinstance(first.get("text"), str)
+        and first["text"].startswith("Tool result from ")
+    )
+
+
+def _is_visual_user_message(message: Any) -> bool:
+    """Return whether a native PydanticAI user part carries camera images."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    return isinstance(content, list) and any(
+        isinstance(item, dict) and item.get("type") in {"image", "image_url"}
+        for item in content
+    )
+
+
+def _project_harness_history_for_backend(payload: dict[str, Any]) -> bool:
+    """Send vLLM a bounded state projection, not the whole tool transcript.
+
+    PydanticAI keeps the authoritative tool-call/tool-return pairing locally.
+    Hy-Embodied's vLLM endpoint only needs the stable controller instructions,
+    the original task, and the newest live RoboTwin result to choose its next
+    tool. Replaying dozens of historical assistant calls into the custom HYV3
+    chat template has produced malformed tool JSON / EOF 400s even after
+    image pruning. Projecting the outbound request removes that unstable
+    history while preserving the complete newest three-camera observation.
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    system_messages = [
+        message
+        for message in messages
+        if isinstance(message, dict) and message.get("role") == "system"
+    ]
+    ordinary_users = [
+        message
+        for message in messages
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and not _is_rehydrated_tool_result(message)
+        and not _is_visual_user_message(message)
+    ]
+    live_state_messages = [
+        message
+        for message in messages
+        if _is_rehydrated_tool_result(message) or _is_visual_user_message(message)
+    ]
+
+    # Preserve the original task/instructions and an explicit continuation
+    # marker if one is currently active; older assistant/tool calls are not
+    # useful to the backend once their latest state has been rehydrated.
+    kept: list[dict[str, Any]] = [*system_messages]
+    if ordinary_users:
+        kept.append(ordinary_users[0])
+        if len(ordinary_users) > 1 and _contains_invalid_termination_marker(
+            ordinary_users[-1].get("content")
+        ):
+            kept.append(ordinary_users[-1])
+    if live_state_messages:
+        # A native PydanticAI ToolReturn puts the status text and all three
+        # BinaryContent camera frames in one following user message. Preserve
+        # that complete bundle exactly; do not keep one image while dropping
+        # its companion views.
+        kept.append(live_state_messages[-1])
+
+    if kept == messages:
+        return False
+    messages[:] = kept
     return True
 
 
@@ -389,9 +550,20 @@ def inject_required_tool_choice(
         for tool in payload.get("tools", [])
         if (name := _tool_name(tool))
     }
+    # These decisions depend on the original protocol transcript. The
+    # backend-facing projection below deliberately removes old assistant/tool
+    # messages, so capture them before projecting.
+    invalid_termination_retry = _is_invalid_termination_retry(payload)
+    history = {_bare_tool_name(name) for name in _message_tool_history(payload)}
+    last_tool_called = _last_tool_called(payload)
     rehydrated_tool_results = _rehydrate_harness_tool_results(payload)
     pruned_stale_results = _prune_stale_harness_tool_results(payload)
-    if _is_invalid_termination_retry(payload):
+    # Inspect the original tool-call history above, then send the model only
+    # a compact latest-state projection. This leaves PydanticAI's local
+    # protocol history untouched while preventing the backend template from
+    # re-parsing an ever-growing list of old tool calls.
+    projected_history = _project_harness_history_for_backend(payload)
+    if invalid_termination_retry:
         recovery_tool = available.get(_RECOVERY_TOOL)
         if recovery_tool and _restrict_to_tool(payload, recovery_tool):
             # ``required`` alone is not reliably honored by hy_v3 after a
@@ -404,13 +576,15 @@ def inject_required_tool_choice(
 
     choice = payload.get("tool_choice")
     if choice not in (None, "", "auto"):
-        if not rehydrated_tool_results and not pruned_stale_results:
+        if (
+            not rehydrated_tool_results
+            and not pruned_stale_results
+            and not projected_history
+        ):
             return body, False
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         ), True
-
-    history = {_bare_tool_name(name) for name in _message_tool_history(payload)}
 
     # Keep every RoboTwin turn profile-neutral: ``required`` guarantees a parseable
     # structured call, while the prompt decides whether memory, perception, a VLA
@@ -437,14 +611,18 @@ def inject_required_tool_choice(
                 payload, ensure_ascii=False, separators=(",", ":")
             ).encode("utf-8"), True
         payload["tool_choice"] = "required"
-        if _last_tool_called(payload) == _OBSERVE_TOOL:
+        if last_tool_called == _OBSERVE_TOOL:
             _append_act_now_reminder(payload)
     else:
         # Non-RoboTwin Harnesses retain the conservative previous behavior:
         # make only their initial MCP request choose a tool, then leave later
         # requests in automatic mode.
         if history:
-            if not rehydrated_tool_results and not pruned_stale_results:
+            if (
+                not rehydrated_tool_results
+                and not pruned_stale_results
+                and not projected_history
+            ):
                 return body, False
             return json.dumps(
                 payload, ensure_ascii=False, separators=(",", ":")
@@ -515,6 +693,19 @@ class ToolChoiceProxyHandler(BaseHTTPRequestHandler):
                 self.command, self.path, body=body or None, headers=headers
             )
             response = connection.getresponse()
+            if response.status >= 400:
+                error_body = response.read()
+                _write_debug_snapshot(
+                    request_body=body,
+                    response_status=response.status,
+                    response_body=error_body,
+                )
+            else:
+                error_body = None
+                _write_debug_snapshot(
+                    request_body=body,
+                    response_status=response.status,
+                )
             self.send_response(response.status, response.reason)
             for key, value in response.getheaders():
                 if key.lower() in {
@@ -533,9 +724,13 @@ class ToolChoiceProxyHandler(BaseHTTPRequestHandler):
             # response cleanly terminates streaming SSE for the client.
             self.send_header("Connection", "close")
             self.end_headers()
-            while chunk := response.read(64 * 1024):
-                self.wfile.write(chunk)
+            if error_body is not None:
+                self.wfile.write(error_body)
                 self.wfile.flush()
+            else:
+                while chunk := response.read(64 * 1024):
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
             self.close_connection = True
         except (ConnectionError, OSError, http.client.HTTPException) as exc:
             self.send_error(502, f"vLLM backend unavailable: {exc}")

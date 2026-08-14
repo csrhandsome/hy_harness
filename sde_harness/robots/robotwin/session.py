@@ -129,7 +129,7 @@ class RobotTwinHarnessPolicy:
         planner_type = str(
             os.environ.get("ROBOTWIN_HARNESS_PLANNER")
             or self.config.get("planner")
-            or "codebuddy"
+            or "api"
         )
         model = os.environ.get("ROBOTWIN_HARNESS_MODEL") or self.config.get("model")
         max_turns = int(
@@ -145,7 +145,7 @@ class RobotTwinHarnessPolicy:
         )
         max_tokens = int(
             os.environ.get("ROBOTWIN_HARNESS_MAX_TOKENS")
-            or self.config.get("max_tokens", 8192)
+            or self.config.get("max_tokens", 512)
         )
         no_images = _truthy(
             os.environ.get("ROBOTWIN_HARNESS_NO_IMAGES")
@@ -222,6 +222,12 @@ class RobotTwinHarnessPolicy:
         if (
             planner_type in {"api", "pydantic_ai", "pydanticai"}
             and planner_result.error
+            # ApiAgentLoop already compacted and retried a partial history
+            # once. Starting an entire second Planner session after that
+            # budget was consumed multiplies tool-call fallout without
+            # recovering additional context. Retain the session-level retry
+            # only for errors raised before the loop could compact history.
+            and not planner_result.stats.get("history_error_retries")
             and is_recoverable_history_error(planner_result.error)
             and status_requires_tool_call(adapter.status())
         ):
