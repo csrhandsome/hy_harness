@@ -43,19 +43,28 @@ img_history_interval: 5
 umi_coord_frame: False
 umi_gripper_space: False
 
-# --- Optional embedded RPent Harness -------------------------------------
+# --- Optional embedded HyHarness Planner ---------------------------------
 # Default false keeps the official direct policy evaluation unchanged.
 # Set enabled=true (or ROBOTWIN_HARNESS=1) to run the Planner and Toolkit
 # against the live RoboTwin TASK_ENV from deploy_policy.py.
 harness:
   enabled: false
+  # codebuddy | api | claude_code
   planner: codebuddy
   model: hy_a3b
+  # For planner=api (pydantic-ai), a provider prefix is added automatically
+  # when missing: hy_a3b -> openai-chat:hy_a3b. Override with e.g.
+  #   model: openai-chat:hy_a3b
+  #   base_url: http://127.0.0.1:8080/v1
+  #   max_tokens: 8192
+  #   no_images: false
+  # For planner=claude_code, model is a Claude Code id (sonnet, opus, ...).
+  #   claude_code_max_budget_usd: 10
   # primitive_first or vla_first
   prompt_profile: primitive_first
   # Empty means only the scoped HyHarness MCP tools; opt in explicitly if needed.
   allowed_tools: ""
   max_turns: 100
-  # Optional CodeBuddy planner timeout (seconds).
+  # Optional planner timeout (seconds).
   # planner_timeout_s: 1200
   # output_dir: logs/robotwin_harness

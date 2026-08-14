@@ -134,6 +134,24 @@ class RobotTwinHarnessPolicy:
         if timeout_value in (None, ""):
             timeout_value = self.config.get("planner_timeout_s")
         planner_timeout_s = None if timeout_value in (None, "") else int(timeout_value)
+        base_url = os.environ.get("ROBOTWIN_HARNESS_BASE_URL") or self.config.get(
+            "base_url"
+        )
+        max_tokens = int(
+            os.environ.get("ROBOTWIN_HARNESS_MAX_TOKENS")
+            or self.config.get("max_tokens", 8192)
+        )
+        no_images = _truthy(
+            os.environ.get("ROBOTWIN_HARNESS_NO_IMAGES")
+            if os.environ.get("ROBOTWIN_HARNESS_NO_IMAGES") not in (None, "")
+            else self.config.get("no_images", False)
+        )
+        budget_value = os.environ.get("ROBOTWIN_HARNESS_CLAUDE_BUDGET_USD")
+        if budget_value in (None, ""):
+            budget_value = self.config.get("claude_code_max_budget_usd")
+        claude_code_max_budget_usd = (
+            None if budget_value in (None, "") else float(budget_value)
+        )
         prompt_profile = (
             str(
                 os.environ.get("ROBOTWIN_HARNESS_PROMPT_PROFILE")
@@ -148,7 +166,6 @@ class RobotTwinHarnessPolicy:
                 f"unknown RoboTwin prompt_profile={prompt_profile!r}; "
                 f"expected one of {PROMPT_PROFILES}"
             )
-        # codebuddy登场
         planner = build_planner(
             planner_type,
             output_dir=output_dir,
@@ -157,6 +174,10 @@ class RobotTwinHarnessPolicy:
             model=model,
             planner_timeout_s=planner_timeout_s,
             allowed_tools=str(self.config.get("allowed_tools", "")),
+            base_url=None if base_url in (None, "") else str(base_url),
+            max_tokens=max_tokens,
+            no_images=no_images,
+            claude_code_max_budget_usd=claude_code_max_budget_usd,
         )
 
         variables = {

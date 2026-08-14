@@ -1,10 +1,13 @@
-"""CodeBuddy Agent SDK planner.
+"""Claude Agent SDK planner.
 
-SDK-first planner backend for the Harness.
-``solve()`` prepares output files, binds the in-process toolkit via
-``create_sdk_mcp_server``, drives the SDK query, and assembles a
-``PlannerResult``. Requires the ``codebuddy-agent-sdk`` package; the default
-local vLLM route uses ``CODEBUDDY_API_KEY=EMPTY`` and needs no remote login.
+SDK-first backend for HyHarness. ``solve()`` prepares output files, binds
+the in-process toolkit via ``create_sdk_mcp_server``, drives the SDK query,
+and assembles a ``PlannerResult``.
+
+Robot-loop rules match CodeBuddy: a coding-agent session completion is not
+a RoboTwin terminal state. ``finish`` is confirmed only by a tool result
+that carries ``_finish``. Empty built-in allowlists stay empty (``tools=[]``),
+never ``None``.
 """
 
 from __future__ import annotations
@@ -36,17 +39,14 @@ from hy_harness.tools.base import BaseTool
 from hy_harness.utils.config import get_repo_root, load_local_env
 from hy_harness.utils.logging import get_logger, init_output_dir
 
-logger = get_logger("codebuddy")
+logger = get_logger("claude")
 
-DEFAULT_MODEL = "hy_a3b"
-
-# ---------------------------------------------------------------------------
-# Public backend
-# ---------------------------------------------------------------------------
+DEFAULT_MODEL = "sonnet"
+_MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024
 
 
-class CodeBuddyPlanner:
-    """Planner backed by the CodeBuddy Agent SDK."""
+class ClaudeCodePlanner:
+    """Planner backed by the Claude Agent SDK."""
 
     def __init__(
         self,
@@ -54,24 +54,27 @@ class CodeBuddyPlanner:
         output_dir: str,
         repo_root: str | Path | None = None,
         model: str | None = None,
-        allowed_tools: str = "Bash Read Write Glob Grep",
+        allowed_tools: str = "",
         timeout_s: int = 1200,
+        max_budget_usd: float = 10.0,
         extra_dirs: list[str] | None = None,
         output_path: str | Path | None = None,
         dashboard: Any = None,
     ):
-        """Initialize the CodeBuddy Agent SDK backend."""
+        """Initialize the Claude Agent SDK backend."""
         load_local_env()
         self._output_dir = str(output_dir)
         self._repo_root = str(repo_root) if repo_root else str(get_repo_root())
-        self._model = model or os.environ.get("CODEBUDDY_MODEL", DEFAULT_MODEL)
+        self._model = model or os.environ.get("CLAUDE_CODE_MODEL", DEFAULT_MODEL)
         self._allowed_tools = allowed_tools
         self._timeout_s = timeout_s
+        self._max_budget_usd = max_budget_usd
         self._extra_dirs = extra_dirs or []
         self._output_path = Path(output_path) if output_path else None
         self._dashboard = dashboard
-        self._api_key = os.environ.get("CODEBUDDY_API_KEY")
-        self._invalid_text_retries = invalid_text_retries()
+        self._invalid_text_retries = invalid_text_retries(
+            env_keys=("CLAUDE_CODE_INVALID_TEXT_RETRIES",)
+        )
 
     def solve(
         self,
@@ -82,7 +85,7 @@ class CodeBuddyPlanner:
         max_turns: int,
         input_queue=None,
     ) -> PlannerResult:
-        """Run a CodeBuddy Agent SDK session for the given prompt."""
+        """Run a Claude Agent SDK session for the given prompt."""
         prompt = f"{system_prompt}\n\n{user_message}" if system_prompt else user_message
         return asyncio.run(
             self._solve_async(
@@ -93,8 +96,6 @@ class CodeBuddyPlanner:
             )
         )
 
-    # -- internal lifecycle -------------------------------------------------
-
     async def _solve_async(
         self,
         prompt: str,
@@ -103,11 +104,11 @@ class CodeBuddyPlanner:
         max_turns: int,
         input_queue=None,
     ) -> PlannerResult:
-        import codebuddy_agent_sdk as sdk
+        import claude_agent_sdk as sdk
 
         if self._output_path is None:
             with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".out", prefix="codebuddy_sdk_task_", delete=False
+                mode="w", suffix=".out", prefix="claude_agent_task_", delete=False
             ) as f:
                 output_path = Path(f.name)
         else:
@@ -117,14 +118,15 @@ class CodeBuddyPlanner:
         recorder = _Recorder(max_turns=max_turns, dashboard=self._dashboard)
 
         init_output_dir(self._output_dir)
-        options = self._build_agent_options(sdk, tools=toolkit, max_turns=max_turns)
+        options = self._build_options(sdk, toolkit=toolkit, max_turns=max_turns)
 
         logger.info("prompt: %d chars", len(prompt))
         logger.info("output_dir: %s", self._output_dir)
         logger.info(
-            "invoking CodeBuddy Agent SDK model %s (timeout=%ds)",
+            "invoking Claude Agent SDK model %s (timeout=%ds, budget=$%s)",
             self._model,
             self._timeout_s,
+            self._max_budget_usd,
         )
 
         started = time.time()
@@ -159,7 +161,6 @@ class CodeBuddyPlanner:
                         emit=_emit,
                     )
                 else:
-                    # TODO:这里没有被启动过。但是也许是一个改良点？
                     await self._run_interactive(
                         sdk,
                         prompt,
@@ -170,8 +171,8 @@ class CodeBuddyPlanner:
                         emit_user=_emit_user,
                     )
             except asyncio.TimeoutError:
-                error = f"CodeBuddy Agent SDK timed out after {self._timeout_s}s"
-                rendered = f"\n[codebuddy-planner] {error}\n"
+                error = f"Claude Agent SDK timed out after {self._timeout_s}s"
+                rendered = f"\n[cc-planner] {error}\n"
                 rendered_chunks.append(rendered)
                 out_f.write(rendered)
                 out_f.flush()
@@ -179,7 +180,7 @@ class CodeBuddyPlanner:
                 logger.info(rendered.rstrip())
             except Exception as e:
                 error = f"{type(e).__name__}: {e}"
-                rendered = f"\n[codebuddy-planner] {error}\n"
+                rendered = f"\n[cc-planner] {error}\n"
                 rendered_chunks.append(rendered)
                 out_f.write(rendered)
                 out_f.flush()
@@ -190,15 +191,15 @@ class CodeBuddyPlanner:
         text = "".join(rendered_chunks) or output_path.read_text(errors="replace")
         error = error or recorder.error
 
-        logger.info("CodeBuddy Agent SDK finished in %.1fs", elapsed)
+        logger.info("Claude Agent SDK finished in %.1fs", elapsed)
         logger.info("output: %s", output_path)
         logger.info("raw stream: %s", raw_stream_path)
 
         return PlannerResult(
             finish_result=recorder.finish_result,
-            messages=[{"role": "codebuddy_sdk", "content": text}],
+            messages=[{"role": "claude_agent_sdk", "content": text}],
             stats={
-                "backend": "codebuddy_sdk",
+                "backend": "claude_agent_sdk",
                 "elapsed_s": round(elapsed, 1),
                 "output_chars": len(text),
                 "output_path": str(output_path),
@@ -219,16 +220,8 @@ class CodeBuddyPlanner:
         timeout_s: int,
         emit,
     ) -> None:
-        """Run one SDK session without cancelling its async generator directly.
-
-        ``sdk.query()`` owns an AnyIO task group. Cancelling the task that is
-        iterating that async generator can make older SDK releases close the
-        group from an async-generator-finalizer task, producing:
-        ``Attempted to exit cancel scope in a different task``. Use the
-        stateful client API instead so timeout handling can interrupt and drain
-        the same session before its context manager disconnects it.
-        """
-        async with sdk.CodeBuddySDKClient(options=options) as client:
+        """Run one SDK session and continue if the model exits in prose."""
+        async with sdk.ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
             deadline = asyncio.get_running_loop().time() + timeout_s
             retries = 0
@@ -250,10 +243,6 @@ class CodeBuddyPlanner:
                 consumer = asyncio.create_task(consume_response())
                 done, _ = await asyncio.wait({consumer}, timeout=remaining)
                 if consumer not in done:
-                    # Do not use asyncio.wait_for() here: it cancels the task
-                    # that is directly iterating the SDK stream. Instead, ask
-                    # the CLI to stop and give that same stream a short chance
-                    # to finish normally.
                     with contextlib.suppress(Exception):
                         await client.interrupt()
                     done, _ = await asyncio.wait({consumer}, timeout=10)
@@ -265,8 +254,6 @@ class CodeBuddyPlanner:
                             await consumer
                     raise asyncio.TimeoutError
 
-                # Propagate an SDK/CLI failure before the context manager
-                # disconnects the session.
                 consumer.result()
                 if recorder.finish_result is not None:
                     return
@@ -307,8 +294,8 @@ class CodeBuddyPlanner:
         emit,
         emit_user,
     ) -> None:
-        """Drive a stateful ``CodeBuddySDKClient`` with live steering."""
-        async with sdk.CodeBuddySDKClient(options=options) as client:
+        """Drive a stateful ``ClaudeSDKClient`` with live steering."""
+        async with sdk.ClaudeSDKClient(options=options) as client:
             stop = asyncio.Event()
 
             async def pump_input() -> None:
@@ -349,84 +336,46 @@ class CodeBuddyPlanner:
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
 
-    # -- options + tool bridge ---------------------------------------------
-
-    def _build_agent_options(self, sdk: Any, *, tools: BaseTool, max_turns: int) -> Any:
+    def _build_options(self, sdk: Any, *, toolkit: BaseTool, max_turns: int) -> Any:
         allowed = [
             part for part in self._allowed_tools.replace(",", " ").split() if part
         ]
         builtins = [name for name in allowed if "__" not in name]
         allowed.extend(
             add_mcp_prefix(str(description["name"]))
-            for description in tools.get_tools_description()
+            for description in toolkit.get_tools_description()
         )
 
-        # The bundled headless CLI and the local OpenAI-compatible endpoint
-        # exchange arbitrary Unicode. Keep the subprocess on UTF-8 even when
-        # a batch launcher inherited ``LANG=C`` / an ASCII-compatible locale.
-        env: dict[str, str] = {
-            "PYTHONUTF8": "1",
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-        }
-        if self._api_key:
-            env["CODEBUDDY_API_KEY"] = self._api_key
-        for key in (
-            "CODEBUDDY_INTERNET_ENVIRONMENT",
-            "CODEBUDDY_AUTH_TOKEN",
-            "CODEBUDDY_CODE_PATH",
-            "CODEBUDDY_BASE_URL",
-            "CODEBUDDY_CUSTOM_HEADERS",
-        ):
-            if val := os.environ.get(key):
-                env[key] = val
-
-        # OpenAI-compatible endpoint (e.g. local vLLM): inject project models.json
-        # and load project settings. Otherwise keep isolation (no filesystem settings).
-        setting_sources: list[str] = []
-        openai_base = os.environ.get(
-            "CODEBUDDY_OPENAI_BASE_URL", "http://127.0.0.1:8080/v1"
-        ).strip()
-        if openai_base:
-            chat_url = _normalize_openai_chat_url(openai_base)
-            # The SDK launches CodeBuddy as a child process and otherwise
-            # inherits shell proxy variables.  A corporate HTTP proxy often
-            # cannot route a loopback/private vLLM endpoint, so extend
-            # NO_PROXY for the configured OpenAI-compatible service.
-            _add_openai_endpoint_to_no_proxy(env, chat_url)
-            if "CODEBUDDY_API_KEY" not in env:
-                env["CODEBUDDY_API_KEY"] = self._api_key or "EMPTY"
-            _write_project_openai_model(
-                repo_root=Path(self._repo_root),
-                model_id=self._model,
-                chat_url=chat_url,
-            )
-            setting_sources = ["project"]
-            logger.info(
-                "CodeBuddy OpenAI-compatible endpoint: model=%s url=%s",
-                self._model,
-                chat_url,
-            )
-
-        return sdk.CodeBuddyAgentOptions(
-            cwd=self._repo_root,
-            model=self._model,
-            max_turns=max_turns,
+        kwargs: dict[str, Any] = {
+            "cwd": self._repo_root,
+            "model": self._model,
+            "max_turns": max_turns,
+            "max_budget_usd": self._max_budget_usd,
+            "max_buffer_size": _MAX_STREAM_BUFFER_BYTES,
             # The SDK treats ``None`` as "enable every built-in tool", while
             # an empty list disables them. RoboTwin passes an empty built-in
             # allowlist so the planner cannot escape the scoped MCP toolkit.
-            tools=builtins,
-            allowed_tools=list(dict.fromkeys(allowed)),
-            permission_mode="bypassPermissions",
-            mcp_servers={
-                "hyharness": _build_hyharness_server(sdk, toolkit=tools),
+            "tools": builtins,
+            "allowed_tools": list(dict.fromkeys(allowed)),
+            "mcp_servers": {
+                "hyharness": _build_hyharness_server(sdk, toolkit=toolkit),
             },
-            # Empty = ignore user/project .codebuddy; ["project"] only when
-            # CODEBUDDY_OPENAI_BASE_URL injects a harness-managed models.json.
-            setting_sources=setting_sources,
-            env=env,
-            stderr=lambda line: logger.debug("[codebuddy-sdk] %s", line.rstrip()),
+            "add_dirs": [self._output_dir, *self._extra_dirs],
+            "setting_sources": [],
+            "stderr": lambda line: logger.debug("[claude-sdk] %s", line.rstrip()),
+        }
+        if _accepts_kwarg(sdk.ClaudeAgentOptions, "permission_mode"):
+            kwargs["permission_mode"] = "bypassPermissions"
+        return sdk.ClaudeAgentOptions(**kwargs)
+
+
+def _accepts_kwarg(cls: Any, name: str) -> bool:
+    try:
+        return name in getattr(cls, "__dataclass_fields__", {}) or name in getattr(
+            cls, "__annotations__", {}
         )
+    except Exception:  # noqa: BLE001 - optional SDK feature detection
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +443,7 @@ class _Recorder:
             return ""
         data = _get(message, "data", {})
         session = data.get("session_id") if isinstance(data, dict) else ""
-        return f"[cb-system] subtype={subtype} session={session}\n"
+        return f"[cc-system] subtype={subtype} session={session}\n"
 
     def _assistant(self, message: Any) -> str:
         self._add_usage(_get(message, "usage"))
@@ -511,9 +460,15 @@ class _Recorder:
             if block_kind == "TextBlock":
                 text = str(_get(block, "text", "")).strip()
                 if text:
-                    lines.append(f"[codebuddy] {text}\n")
+                    lines.append(f"[claude] {text}\n")
                     if self.dashboard is not None:
                         self.dashboard.on_event({"type": "text", "text": text})
+            elif block_kind == "ThinkingBlock":
+                thinking = str(_get(block, "thinking", "")).strip()
+                if thinking:
+                    lines.append(f"[claude-thinking] {thinking}\n")
+                    if self.dashboard is not None:
+                        self.dashboard.on_event({"type": "thinking", "text": thinking})
             elif block_kind == "ToolUseBlock":
                 tool_id = str(_get(block, "id", ""))
                 name = strip_mcp_prefix(str(_get(block, "name", "tool")))
@@ -529,7 +484,7 @@ class _Recorder:
             elif block_kind == "ToolResultBlock":
                 lines.append(self._tool_result(block))
         if assistant_error := _get(message, "error"):
-            lines.append(f"[cb-assistant-error] {assistant_error}\n")
+            lines.append(f"[cc-assistant-error] {assistant_error}\n")
         return "".join(lines)
 
     def _user(self, message: Any) -> str:
@@ -579,10 +534,6 @@ class _Recorder:
             and result_payload.get("_finish") is True
             and self.finish_result is None
         ):
-            # A finish request is only terminal when the *tool result*
-            # explicitly confirms it. CodeBuddy can serialize rejected MCP
-            # results as text with ``is_error=false``; trusting the original
-            # tool request would incorrectly interrupt the planner.
             self.finish_result = result_payload
         if self.dashboard is not None:
             self.dashboard.on_event(
@@ -603,10 +554,10 @@ class _Recorder:
         self.suppress_next_result_error = False
         if _get(message, "is_error", False) and not suppress:
             self.error = (
-                f"CodeBuddy Agent SDK result {_get(message, 'subtype', 'error')}"
+                f"Claude Agent SDK result {_get(message, 'subtype', 'error')}"
             )
 
-        parts = ["[cb-result]", str(_get(message, "subtype", ""))]
+        parts = ["[cc-result]", str(_get(message, "subtype", ""))]
         if duration_ms := _get(message, "duration_ms"):
             parts.append(f"duration={duration_ms / 1000:.1f}s")
         if self.total_cost_usd is not None:
@@ -650,11 +601,6 @@ class _Recorder:
         }
 
 
-# ---------------------------------------------------------------------------
-# Tool bridge (HyHarness registry -> SDK MCP server)
-# ---------------------------------------------------------------------------
-
-
 def _build_hyharness_server(sdk: Any, *, toolkit: BaseTool) -> Any:
     sdk_tools = []
     for spec in toolkit.get_tools_description():
@@ -680,123 +626,28 @@ def _tool_result_to_mcp(tr: Any) -> dict[str, Any]:
     if blocks is None:
         return {"content": [{"type": "text", "text": str(tr)}]}
 
-    text_blocks: list[str] = []
-    images: list[dict[str, str]] = []
+    content: list[dict[str, Any]] = []
     for block in blocks:
         block_type = _get(block, "type")
         if block_type == "text":
-            text_blocks.append(str(_get(block, "text", "")))
+            content.append({"type": "text", "text": _get(block, "text", "")})
         elif block_type == "image":
             src = _get(block, "source", {})
-            images.append(
+            content.append(
                 {
+                    "type": "image",
                     "data": _get(src, "data", ""),
                     "mimeType": _get(src, "media_type", "image/png"),
                 }
             )
 
-    if images:
-        # CodeBuddy's chat-completions transport accepts text-only tool
-        # results. Preserve the images in a private JSON envelope; the local
-        # proxy decodes it before forwarding the turn to vLLM as image_url
-        # user content.
-        content = [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {
-                        "_hyharness_multimodal": {
-                            "text": "\n".join(text_blocks),
-                            "images": images,
-                        }
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            }
-        ]
-    else:
-        content = [{"type": "text", "text": text} for text in text_blocks]
-
     response: dict[str, Any] = {"content": content}
     result_dict = getattr(tr, "result", None)
     if isinstance(result_dict, dict) and result_dict.get("error"):
-        # MCP's CallToolResult schema uses camelCase. ``is_error`` is ignored
-        # by CodeBuddy's MCP client and makes failed file/tool calls look like
-        # normal observations to the planner.
+        # MCP CallToolResult uses camelCase; also set snake_case for older SDKs.
         response["isError"] = True
+        response["is_error"] = True
     return response
-
-
-# ---------------------------------------------------------------------------
-# OpenAI-compatible endpoint (local vLLM / custom chat API)
-# ---------------------------------------------------------------------------
-
-
-def _normalize_openai_chat_url(base: str) -> str:
-    """Return a full ``.../chat/completions`` URL for CodeBuddy models.json."""
-    url = base.rstrip("/")
-    if url.endswith("/chat/completions"):
-        return url
-    if url.endswith("/v1"):
-        return f"{url}/chat/completions"
-    return f"{url}/v1/chat/completions"
-
-
-def _add_openai_endpoint_to_no_proxy(env: dict[str, str], chat_url: str) -> None:
-    """Ensure the configured OpenAI-compatible host bypasses inherited proxies."""
-    from urllib.parse import urlparse
-
-    hostname = urlparse(chat_url).hostname
-    if not hostname:
-        return
-
-    existing = (
-        env.get("NO_PROXY")
-        or env.get("no_proxy")
-        or os.environ.get("NO_PROXY")
-        or os.environ.get("no_proxy", "")
-    )
-    entries = [part.strip() for part in existing.split(",") if part.strip()]
-    if hostname not in entries:
-        entries.append(hostname)
-    # Some HTTP stacks only inspect lowercase while others inspect uppercase.
-    value = ",".join(entries)
-    env["NO_PROXY"] = value
-    env["no_proxy"] = value
-
-
-def _write_project_openai_model(
-    *,
-    repo_root: Path,
-    model_id: str,
-    chat_url: str,
-) -> Path:
-    """Write harness-managed ``.codebuddy/models.json`` under ``repo_root``."""
-    codebuddy_dir = repo_root / ".codebuddy"
-    codebuddy_dir.mkdir(parents=True, exist_ok=True)
-    path = codebuddy_dir / "models.json"
-    payload = {
-        "models": [
-            {
-                "id": model_id,
-                "name": model_id,
-                "vendor": "OpenAI",
-                "apiKey": "${CODEBUDDY_API_KEY}",
-                "url": chat_url,
-                "supportsToolCall": True,
-                "supportsImages": True,
-            }
-        ],
-        "availableModels": [model_id],
-    }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-    return path
-
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
 
 
 def _kind(value: Any) -> str:
@@ -812,7 +663,6 @@ def _get(value: Any, key: str, default: Any = None) -> Any:
 
 
 def _usage_dict(usage: Any) -> dict[str, Any]:
-    """Return ``usage`` as a dict, whether the SDK sends a dataclass or raw dict."""
     if isinstance(usage, dict):
         return usage
     if dataclasses.is_dataclass(usage):
@@ -821,11 +671,7 @@ def _usage_dict(usage: Any) -> dict[str, Any]:
 
 
 def _tool_result_payload(content: Any) -> dict[str, Any] | None:
-    """Recover the result dict nested in CodeBuddy's tool-result text.
-
-    The SDK can wrap an MCP result as nested lists/dicts and JSON-encoded text,
-    e.g. ``[{"type": "text", "text": "[{\\"type\\": ...}]"}]``.
-    """
+    """Recover the result dict nested in the SDK's tool-result text."""
     pending: list[Any] = [content]
     seen_strings: set[str] = set()
     while pending:

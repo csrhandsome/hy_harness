@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from hy_harness.planner.base import build_planner
+from hy_harness.planner.claude_code import ClaudeCodePlanner
+from hy_harness.planner.codebuddy import CodeBuddyPlanner
 from robots.robotwin.tools import RobotTwinEnvAdapter, RobotTwinTools
 from test_robotwin_tools import FakePolicy, FakeTaskEnv, encode
 
@@ -35,4 +39,26 @@ def test_build_planner_preserves_explicit_empty_builtin_set(tmp_path):
         env_name="robotwin",
         allowed_tools="",
     )
+    assert isinstance(planner, CodeBuddyPlanner)
     assert planner._allowed_tools == ""
+
+
+def test_build_planner_rejects_unknown_backend(tmp_path):
+    with pytest.raises(ValueError, match="unknown planner_type"):
+        build_planner(
+            "not-a-planner",
+            output_dir=tmp_path,
+            recipe_tag="task_t0",
+            env_name="robotwin",
+        )
+
+
+def test_build_planner_claude_alias(tmp_path):
+    planner = build_planner(
+        "claude",
+        output_dir=tmp_path,
+        recipe_tag="task_t0",
+        env_name="robotwin",
+        allowed_tools="",
+    )
+    assert isinstance(planner, ClaudeCodePlanner)
