@@ -70,6 +70,7 @@ def build_planner(
     base_url: str | None = None,
     max_tokens: int = 8192,
     no_images: bool = False,
+    enable_thinking: bool = False,
     claude_code_max_budget_usd: float | None = None,
 ):
     """Build a planner for the given backend, resolving credentials from env vars."""
@@ -106,6 +107,7 @@ def build_planner(
             max_tokens=max_tokens,
             dashboard=dashboard,
             no_images=no_images,
+            enable_thinking=enable_thinking,
             planner_timeout_s=planner_timeout_s,
         )
 
@@ -129,6 +131,7 @@ def build_planner(
             model=model,
             timeout_s=cc_timeout_s,
             max_budget_usd=cc_budget,
+            enable_thinking=enable_thinking,
             allowed_tools="" if allowed_tools is None else allowed_tools,
             extra_dirs=[str(get_memory_dir(env_name))],
             output_path=Path(output_dir) / f"claude_{recipe_tag}.txt",
@@ -145,6 +148,7 @@ def _build_api_planner(
     max_tokens: int,
     dashboard: Any,
     no_images: bool,
+    enable_thinking: bool,
     planner_timeout_s: int | None,
 ):
     """Construct the pydantic-ai robot controller."""
@@ -206,6 +210,7 @@ def _build_api_planner(
         max_tokens=max_tokens,
         dashboard=dashboard,
         no_images=no_images,
+        enable_thinking=enable_thinking,
         timeout_s=timeout_s,
     )
 

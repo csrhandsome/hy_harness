@@ -20,17 +20,16 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from hy_harness.memory import prune_history_images
+from hy_harness.planner.base import build_planner
 from hy_harness.planner.pydantic_loop import (
     ApiAgentLoop,
-    _RunState,
     _build_tools,
     _content_blocks_to_pydantic,
     _make_tool_function,
-    _prune_history,
+    _RunState,
 )
-from hy_harness.planner.base import build_planner
 from hy_harness.tools.base import BaseTool, ToolResult
-
 
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8Dw"
@@ -171,7 +170,7 @@ def test_tool_wrapper_returns_images_as_binary_content() -> None:
     assert any(isinstance(item, BinaryContent) for item in returned.content)
 
 
-def test_prune_history_keeps_latest_observe_and_stubs_old_tool_returns() -> None:
+def test_prune_history_keeps_latest_observe_images() -> None:
     img = BinaryContent(data=_PNG, media_type="image/png")
     messages: list[ModelMessage] = []
     for index in range(6):
@@ -187,10 +186,8 @@ def test_prune_history_keeps_latest_observe_and_stubs_old_tool_returns() -> None
                 ]
             )
         )
-    pruned = _prune_history(messages)
+    pruned = prune_history_images(messages)
     image_messages = 0
-    stubbed = 0
-    kept_returns = 0
     for message in pruned:
         for part in message.parts:
             if isinstance(part, UserPromptPart) and isinstance(part.content, list):
@@ -200,25 +197,14 @@ def test_prune_history_keeps_latest_observe_and_stubs_old_tool_returns() -> None
                 if images:
                     image_messages += 1
                     assert len(images) == 3
-            if isinstance(part, ToolReturnPart):
-                if (
-                    part.content
-                    == "[earlier tool result omitted to bound request size]"
-                ):
-                    stubbed += 1
-                else:
-                    kept_returns += 1
     assert image_messages == 4
-    assert kept_returns == 4
-    assert stubbed == 2
 
 
-def test_build_tools_hides_legacy_finish_and_serializes_environment_calls() -> None:
+def test_build_tools_hides_legacy_finish_and_write_text_file() -> None:
     toolkit = _RobotToolkit()
     tools = _build_tools(toolkit, no_images=True, run_state=_RunState())
     assert {tool.name for tool in tools} == {
         "read_text_file",
-        "write_text_file",
         "list_dir",
         "robotwin_observe",
     }

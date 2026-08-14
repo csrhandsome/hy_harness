@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from hy_harness.context.prompt_utils import format_prompt
+from hy_harness.memory import is_recoverable_history_error
+from hy_harness.planner.loop_control import status_requires_tool_call
+from hy_harness.utils.logging import get_logger
 
 from .prompt import PROMPT_PROFILES, system_prompt, user_prompt
 from .tools import RobotTwinEnvAdapter, RobotTwinTools
@@ -22,6 +25,9 @@ def _truthy(value: Any) -> bool:
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value).strip("_")[:80] or "task"
+
+
+logger = get_logger("robotwin_session")
 
 
 class RobotTwinHarnessPolicy:
@@ -146,6 +152,11 @@ class RobotTwinHarnessPolicy:
             if os.environ.get("ROBOTWIN_HARNESS_NO_IMAGES") not in (None, "")
             else self.config.get("no_images", False)
         )
+        enable_thinking = _truthy(
+            os.environ.get("ROBOTWIN_HARNESS_ENABLE_THINKING")
+            if os.environ.get("ROBOTWIN_HARNESS_ENABLE_THINKING") not in (None, "")
+            else self.config.get("enable_thinking", False)
+        )
         budget_value = os.environ.get("ROBOTWIN_HARNESS_CLAUDE_BUDGET_USD")
         if budget_value in (None, ""):
             budget_value = self.config.get("claude_code_max_budget_usd")
@@ -177,6 +188,7 @@ class RobotTwinHarnessPolicy:
             base_url=None if base_url in (None, "") else str(base_url),
             max_tokens=max_tokens,
             no_images=no_images,
+            enable_thinking=enable_thinking,
             claude_code_max_budget_usd=claude_code_max_budget_usd,
         )
 
@@ -207,6 +219,22 @@ class RobotTwinHarnessPolicy:
             toolkit=tools,
             max_turns=max_turns,
         )
+        if (
+            planner_type in {"api", "pydantic_ai", "pydanticai"}
+            and planner_result.error
+            and is_recoverable_history_error(planner_result.error)
+            and status_requires_tool_call(adapter.status())
+        ):
+            logger.warning(
+                "planner interrupted by recoverable history error; "
+                "starting a fresh pydantic session from live RoboTwin state"
+            )
+            planner_result = planner.solve(
+                system_prompt=system,
+                user_message=user,
+                toolkit=tools,
+                max_turns=max_turns,
+            )
         self._has_run = True
         self.recipe_path = tools.write_recipe(recipe_tag)
         audit: dict[str, Any] = {}
