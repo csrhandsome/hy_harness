@@ -6,13 +6,13 @@
 #
 # The runner script is expected to accept a Hy-VLA config path and policy module
 # via common argparse-style flags:
-#   --config robodojo_eval/deploy_policy.yml
+#   --config robodojo_eval/deploy_policy.yaml
 #   --policy_name robodojo_eval.deploy_policy
 #   --task_name <task_name>
 #   --seed <seed>
 #
 # If your RoboDojo checkout uses different flag names, invoke its runner
-# directly and point it at robodojo_eval/deploy_policy.yml.
+# directly and point it at robodojo_eval/deploy_policy.yaml.
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 
 PYTHONWARNINGS=ignore::UserWarning \
 python "${runner_script}" \
-    --config robodojo_eval/deploy_policy.yml \
+    --config robodojo_eval/deploy_policy.yaml \
     --policy_name robodojo_eval.deploy_policy \
     --task_name "${task_name}" \
     --seed "${seed}" \

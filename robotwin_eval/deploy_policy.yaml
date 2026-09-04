@@ -3,7 +3,7 @@
 # This file lives next to deploy_policy.py and is consumed by RoboTwin's
 # script/eval_policy.py via:
 #
-#   python script/eval_policy.py --config policy/hy_vla/deploy_policy.yml \
+#   python script/eval_policy.py --config policy/hy_vla/deploy_policy.yaml \
 #       --overrides --task_name <task> --task_config <cfg> --seed <s> --policy_name hy_vla
 #
 # Task-side knobs (task_name, task_config, ckpt_setting, seed, test_num,
@@ -68,3 +68,8 @@ harness:
   # Optional planner timeout (seconds).
   # planner_timeout_s: 1200
   # output_dir: logs/robotwin_harness
+  # One atomic, MCAP-compatible episode HDF5 is written per Harness run.
+  recorder:
+    enabled: true
+    fps: 30
+    jpeg_quality: 95

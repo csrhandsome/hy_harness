@@ -1,14 +1,14 @@
-{
-  "models": [
-    {
-      "id": "hy_a3b",
-      "name": "hy_a3b",
-      "vendor": "OpenAI",
-      "apiKey": "${CODEBUDDY_API_KEY}",
-      "url": "http://127.0.0.1:8080/v1/chat/completions",
-      "supportsToolCall": true,
-      "supportsImages": true
-    }
-  ],
-  "availableModels": ["hy_a3b"]
-}
+// {
+//   "models": [
+//     {
+//       "id": "hy_a3b",
+//       "name": "hy_a3b",
+//       "vendor": "OpenAI",
+//       "apiKey": "${CODEBUDDY_API_KEY}",
+//       "url": "http://127.0.0.1:8080/v1/chat/completions",
+//       "supportsToolCall": true,
+//       "supportsImages": true
+//     }
+//   ],
+//   "availableModels": ["hy_a3b"]
+// }

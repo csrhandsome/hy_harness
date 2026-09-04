@@ -30,7 +30,7 @@ from pydantic_ai import (
     ToolOutput,
     ToolReturn,
 )
-from pydantic_ai.capabilities import Thinking
+from pydantic_ai.capabilities import PrepareOutputTools, Thinking
 from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
@@ -235,7 +235,11 @@ class ApiAgentLoop:
                 self._max_tokens,
                 enable_thinking=self._enable_thinking,
             ),
-            capabilities=_build_capabilities(self._model, self._history_memory),
+            capabilities=_build_capabilities(
+                self._model,
+                self._history_memory,
+                toolkit=toolkit,
+            ),
             # The default PydanticAI output/tool retry budget is one. Local
             # HyV3 occasionally emits an incomplete or malformed tool call
             # after a rejected finish; retry inside the same structured loop
@@ -420,20 +424,31 @@ class ApiAgentLoop:
                         if partial_history:
                             history = partial_history
                     if (
-                        history
-                        and history_error_retries < _HISTORY_ERROR_RETRIES
+                        history_error_retries < _HISTORY_ERROR_RETRIES
                         and is_recoverable_history_error(e)
                         and status_requires_tool_call(toolkit_status(toolkit))
                     ):
                         history_error_retries += 1
-                        history = await self._history_memory.compact_for_retry(
-                            history, model=self._model
-                        )
+                        if history:
+                            history = await self._history_memory.compact_for_retry(
+                                history, model=self._model
+                            )
+                            retry_mode = "compacted partial history"
+                        else:
+                            # A provider can reject the first request in a
+                            # freshly opened ``agent.iter`` before it exposes
+                            # usable message history. Treat that as a
+                            # recoverable transport/schema failure too: start
+                            # a bounded fresh controller continuation instead
+                            # of returning PlannerResult(error=...) and
+                            # handing control to an outer fallback.
+                            history = None
+                            retry_mode = "fresh history reset"
                         seed = HISTORY_COMPACT_CONTINUATION
                         messages.append({"role": "user", "content": seed})
                         logger.warning(
-                            "recoverable history 400; compacted tool pairs "
-                            "and retrying %d/%d",
+                            "recoverable history 400; %s and retrying %d/%d",
+                            retry_mode,
                             history_error_retries,
                             _HISTORY_ERROR_RETRIES,
                         )
@@ -597,11 +612,42 @@ def _register_terminal_validator(
         )
 
 
-def _build_capabilities(model: Model, history_memory: HistoryMemory) -> list[Any]:
+def _build_capabilities(
+    model: Model,
+    history_memory: HistoryMemory,
+    *,
+    toolkit: BaseTool,
+) -> list[Any]:
     capabilities: list[Any] = list(history_memory.capabilities())
+    if _is_openai_chat_model(model):
+        # HyV3 sees output tools in the same OpenAI function-tool list as
+        # physical controls. If robotwin_terminal is always advertised, the
+        # model frequently guesses a success/failure terminal state while the
+        # simulator remains live. The validator correctly rejects it, but
+        # three repeated guesses exhaust PydanticAI's output retry budget and
+        # the deployment silently falls back to raw VLA. Do not advertise the
+        # terminal schema until the simulator itself is terminal.
+        async def _prepare_terminal_tools(
+            _ctx: Any,
+            tool_defs: list[Any],
+        ) -> list[Any]:
+            return await _prepare_terminal_output_tools(toolkit, tool_defs)
+
+        capabilities.append(PrepareOutputTools(_prepare_terminal_tools))
     if _is_anthropic_model(model):
         capabilities.insert(0, Thinking(effort="high"))
     return capabilities
+
+
+async def _prepare_terminal_output_tools(
+    toolkit: BaseTool,
+    tool_defs: list[Any],
+) -> list[Any]:
+    """Expose structured terminal output only after RoboTwin is terminal."""
+    status = toolkit_status(toolkit) or {}
+    if bool(status.get("success")) or bool(status.get("done")):
+        return tool_defs
+    return []
 
 
 def _is_anthropic_model(model: Model) -> bool:
@@ -727,15 +773,14 @@ def _prepare_robotwin_tool(
     async def _prepare(_ctx: Any, tool_def: Any) -> Any:
         if robotwin_vla_controller:
             # The live RoboTwin action result always returns authoritative
-            # status plus all three camera images. A closed-loop Hy-VLA
-            # controller therefore needs exactly one bootstrap observation,
-            # then fresh VLA chunks until the structured terminal validator
-            # sees done/success. Exposing file I/O, status polling, raw EE,
-            # and speculative primitives lets the local model create long
-            # non-moving tool transcripts that its HYV3 parser later rejects.
+            # status plus all three camera images. Bootstrap with one
+            # observation, then let the planner choose either a fresh VLA
+            # chunk *or* a validated named direct-arm primitive. Do not expose
+            # file I/O, status polling, or raw EE arrays: those were the
+            # sources of non-moving transcripts and malformed history.
             if run_state.observe_calls == 0:
                 return tool_def if name == "robotwin_observe" else None
-            return tool_def if name == "robotwin_vla_chunk" else None
+            return tool_def if name in _MOTION_TOOLS else None
         if name in _FILE_LOOKUP_TOOLS and (
             run_state.file_lookup_calls >= _MAX_FILE_LOOKUP_CALLS
         ):

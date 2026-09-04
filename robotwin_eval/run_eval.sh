@@ -210,7 +210,7 @@ run_worker() {
       PYTHONWARNINGS="ignore::UserWarning" \
       uv --project "${ROBOTWIN_EVAL_ROOT}" run --locked --no-sync \
         python -u script/eval_policy.py \
-          --config policy/hy_vla/deploy_policy.yml \
+          --config policy/hy_vla/deploy_policy.yaml \
           --overrides \
             --task_name "${task}" \
             --task_config "${TASK_CONFIG}" \

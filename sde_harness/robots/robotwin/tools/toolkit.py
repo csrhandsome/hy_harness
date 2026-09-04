@@ -73,6 +73,7 @@ class RobotTwinTools(BaseTool):
         output_dir: str | Path | None = None,
         audit_path: str | Path | None = None,
         read_roots: list[str | Path] | None = None,
+        recorder: Any | None = None,
         dashboard: Any = None,
     ) -> None:
         super().__init__(dashboard=dashboard)
@@ -80,6 +81,8 @@ class RobotTwinTools(BaseTool):
         self.policy = policy
         self.output_dir = Path(output_dir).resolve() if output_dir else None
         self.audit_path = Path(audit_path).resolve() if audit_path else None
+        self.recorder = recorder
+        self._recorder_error: str | None = None
         roots = list(read_roots or [])
         if self.output_dir is not None:
             roots.append(self.output_dir)
@@ -316,6 +319,10 @@ class RobotTwinTools(BaseTool):
             "primitive_actions": sum(
                 record["source"] != "robotwin_vla_chunk" for record in self._records
             ),
+            "hdf5_frames": int(getattr(self.recorder, "frames", 0))
+            if self.recorder is not None
+            else 0,
+            "hdf5_recorder_error": self._recorder_error,
         }
 
     def vla_chunk(
@@ -355,7 +362,15 @@ class RobotTwinTools(BaseTool):
     def execute_ee(self, action: list[float], repeat: int = 1) -> dict[str, Any]:
         return self._run("execute_ee", action=action, repeat=repeat)
 
-    def _record(self, action: Any, *, action_type: str, source: str) -> None:
+    def _record(
+        self,
+        action: Any,
+        *,
+        action_type: str,
+        source: str,
+        observation: dict[str, Any] | None = None,
+        pre_action_status: dict[str, Any] | None = None,
+    ) -> None:
         self._records.append(
             {
                 "step": len(self._records),
@@ -365,6 +380,17 @@ class RobotTwinTools(BaseTool):
                 **self.env.status(),
             }
         )
+        if self.recorder is None or observation is None:
+            return
+        try:
+            self.recorder.record_step(
+                observation=observation,
+                action=action,
+                action_source=source,
+                pre_action_status=pre_action_status,
+            )
+        except Exception as exc:  # The recorder must never interrupt a robot action.
+            self._recorder_error = f"{type(exc).__name__}: {exc}"
 
     def write_recipe(self, recipe_tag: str) -> str:
         output_dir = self.output_dir or get_output_dir() or Path.cwd()

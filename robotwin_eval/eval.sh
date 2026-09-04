@@ -13,7 +13,7 @@
 # The five positional arguments are forwarded to RoboTwin's
 # script/eval_policy.py via --overrides; everything Hy-VLA-specific
 # (ckpt_path, blend_mode, exc_action_size, MEM cadence, ...) lives in
-# deploy_policy.yml and can be overridden the same way.
+# deploy_policy.yaml and can be overridden the same way.
 
 set -euo pipefail
 
@@ -27,7 +27,7 @@ export CUDA_VISIBLE_DEVICES=${gpu_id}
 echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 
 PYTHONWARNINGS=ignore::UserWarning \
-python script/eval_policy.py --config policy/hy_vla/deploy_policy.yml \
+python script/eval_policy.py --config policy/hy_vla/deploy_policy.yaml \
     --overrides \
     --task_name "${task_name}" \
     --task_config "${task_config}" \

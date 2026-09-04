@@ -128,8 +128,7 @@ class RobotTwinActionExecutor:
             if self.env.done():
                 break
             last = self._as_ee_action(action, source="Hy-VLA chunk action")
-            self.env.take_action(last, action_type="ee")
-            self._record_action(last, source="robotwin_vla_chunk")
+            self._take_and_record(last, source="robotwin_vla_chunk")
             executed += 1
             # Preserve video-history cadence without an extra model forward.
             if index + 1 < min(requested, len(actions)) and not self.env.done():
@@ -342,8 +341,7 @@ class RobotTwinActionExecutor:
                 action[offset + 7] = target[offset + 7]
             if complete:
                 break
-            self.env.take_action(action, action_type="ee")
-            self._record_action(action, source=source)
+            self._take_and_record(action, source=source)
             applied += 1
             last = action
         return ExecutionResult(applied_steps=applied, last_action=last)
@@ -356,16 +354,47 @@ class RobotTwinActionExecutor:
             if self.env.done():
                 break
             last = self._as_ee_action(action, source=source)
-            self.env.take_action(last, action_type="ee")
-            self._record_action(last, source=source)
+            self._take_and_record(last, source=source)
             applied += 1
             if index + 1 < len(actions) and not self.env.done():
                 self._sync_policy_observation()
         return ExecutionResult(applied_steps=applied, last_action=last)
 
-    def _record_action(self, action: np.ndarray, *, source: str) -> None:
+    def _take_and_record(self, action: np.ndarray, *, source: str) -> None:
+        """Execute one action while retaining the observation it was conditioned on.
+
+        The environment refreshes its observation inside ``take_action``. A
+        recorder invoked afterwards must therefore receive this pre-action
+        snapshot explicitly, otherwise it would incorrectly pair ``action_t``
+        with ``observation_(t+1)``.
+        """
+        observation = dict(self.env.encoded_observation())
+        status_method = getattr(self.env, "status", None)
+        pre_action_status = status_method() if callable(status_method) else None
+        self.env.take_action(action, action_type="ee")
+        self._record_action(
+            action,
+            source=source,
+            observation=observation,
+            pre_action_status=pre_action_status,
+        )
+
+    def _record_action(
+        self,
+        action: np.ndarray,
+        *,
+        source: str,
+        observation: dict[str, Any] | None = None,
+        pre_action_status: dict[str, Any] | None = None,
+    ) -> None:
         if self._record is not None:
-            self._record(action, action_type="ee", source=source)
+            self._record(
+                action,
+                action_type="ee",
+                source=source,
+                observation=observation,
+                pre_action_status=pre_action_status,
+            )
 
     @classmethod
     def _as_ee_action(cls, action: Any, *, source: str) -> np.ndarray:

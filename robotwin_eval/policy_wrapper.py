@@ -244,6 +244,66 @@ class HyVLAPolicyWrapper:
         limit = max(1, min(limit, len(actions)))
         return actions[:limit].copy()
 
+    @torch.no_grad()
+    def extract_prefix(
+        self, batch: dict[str, Any], *, observe: bool = True
+    ) -> dict[str, torch.Tensor]:
+        """Return the frozen VLM prefix for exactly one RobotWin observation.
+
+        This shares the deployed wrapper's image history, padding, SigLIP
+        normalization and prompt tokenization. ``value`` is intentionally the
+        post-VLM ``prefix_out`` consumed by SAFE, not a vision-only feature.
+        """
+        if observe:
+            self.observe(batch)
+        model_batch = dict(batch)
+        if self.use_video_encoder:
+            if not self._top_imgs:
+                raise RuntimeError("video prefix extraction requires observe() first")
+            self._inject_history_stacks(model_batch)
+
+        for key, value in list(model_batch.items()):
+            if (
+                isinstance(value, np.ndarray)
+                and not key.startswith("raw_images.")
+                and key != "task"
+            ):
+                model_batch[key] = torch.from_numpy(value).to(self.weight_dtype).cuda()
+            elif isinstance(value, torch.Tensor):
+                model_batch[key] = value.to(self.weight_dtype).cuda()
+
+        images, img_masks = self.policy.prepare_images(model_batch)
+        lang_tokens, lang_masks, _ = self.policy.prepare_language(model_batch)
+        flow_model = self.policy.model
+        (
+            prefix_embs,
+            prefix_pad_masks,
+            prefix_att_masks,
+            modality_mask_prefix,
+            image_idx_ranges,
+            image_full_ranges,
+        ) = flow_model.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        from hy_vla.modeling_hy_vla import make_att_2d_masks
+
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        flow_model._apply_visual_segment_mask(
+            prefix_att_2d_masks, image_idx_ranges, image_full_ranges
+        )
+        (prefix_out, _), _, _, _ = flow_model.dual_tower.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=True,
+            modality_masks=[modality_mask_prefix, None],
+        )
+        return {
+            "value": prefix_out[0].detach().cpu(),
+            "pad_mask": prefix_pad_masks[0].detach().cpu(),
+        }
+
     def _predict_fresh_chunk(self, batch: dict[str, Any]) -> np.ndarray:
         """Run the network once and decode the complete physical action chunk."""
         initial_ee_pose_wxyz = batch["observation.state"][0, :16].copy()
@@ -413,7 +473,7 @@ class HyVLAPolicyWrapper:
 # then instantiate the wrapper.
 # ---------------------------------------------------------------------------
 def build_policy(usr_args: dict[str, Any]) -> HyVLAPolicyWrapper:
-    """Build a ``HyVLAPolicyWrapper`` from a ``deploy_policy.yml``-style dict.
+    """Build a ``HyVLAPolicyWrapper`` from a ``deploy_policy.yaml``-style dict.
 
     The single norm pickle defaults to ``<ckpt_path>/norm_stats.pkl``
     (the layout used by the released HuggingFace repos); an explicit

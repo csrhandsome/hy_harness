@@ -97,9 +97,12 @@ def user_prompt() -> PromptNode:
         "BEGIN": (
             "If read_text_file is available, it may read only {{memory_dir}}/MEMORY.md "
             "and at most two leaves named by that index. Otherwise, or after "
-            "that small lookup budget, call robotwin_observe once. Then use "
-            "fresh robotwin_vla_chunk actions; each completed action already "
-            "returns the next three-camera observation and status."
+            "that small lookup budget, call robotwin_observe once. Then choose "
+            "between a fresh robotwin_vla_chunk and named direct-arm primitives "
+            "such as robotwin_move_arm, robotwin_translate_arm, "
+            "robotwin_rotate_arm, robotwin_set_gripper, robotwin_release, or "
+            "robotwin_hold. Each completed action returns the next three-camera "
+            "observation and status."
         ),
     }
 

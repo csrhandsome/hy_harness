@@ -275,7 +275,7 @@ run_worker() {
             CUDA_VISIBLE_DEVICES="${gpu_id}" \
             PYTHONWARNINGS=ignore::UserWarning \
             python -u script/eval_policy.py \
-                --config policy/hy_vla/deploy_policy.yml \
+                --config policy/hy_vla/deploy_policy.yaml \
                 --overrides \
                     --task_name "${task}" \
                     --task_config "${task_config}" \

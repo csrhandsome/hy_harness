@@ -14,7 +14,7 @@ dependencies = [
     "codebuddy-agent-sdk>=0.3.0",
     "claude-agent-sdk>=0.1.60",
     "huggingface-hub>=0.24",
-    "numpy>=1.24,<2.0", "imageio>=2.0", "scipy>=1.11",
+    "numpy>=1.24,<2.0", "imageio>=2.0", "Pillow>=10.0", "h5py>=3.10", "scipy>=1.11",
 ]
 [project.scripts]
 sde-harness = "hy_harness.cli.main:main"
@@ -23,7 +23,7 @@ hyharness = "hy_harness.cli.main:main"
 include-package-data = true
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["hy_harness*", "robots*"]
+include = ["hy_harness*", "robots*", "training*"]
 exclude = ["tests*", "docs*", "scripts*", "resources*"]
 [tool.uv]
 package = true

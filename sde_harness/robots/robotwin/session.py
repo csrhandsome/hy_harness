@@ -115,17 +115,36 @@ class RobotTwinHarnessPolicy:
         memory_dir.mkdir(parents=True, exist_ok=True)
         reference_dir = resources_dir / "references"
         audit_path = output_dir / f"{recipe_tag}.json"
+        recorder_config = self.config.get("recorder") or {}
+        if not isinstance(recorder_config, dict):
+            raise TypeError("harness.recorder must be a mapping when provided")
+        recorder = None
+        if _truthy(recorder_config.get("enabled", True)):
+            from .recorder import RobotWinHdf5Recorder
+
+            filename = Path(
+                str(recorder_config.get("filename") or f"{recipe_tag}.hdf5")
+            ).name
+            recorder = RobotWinHdf5Recorder(
+                output_dir / filename,
+                instruction=adapter.instruction(),
+                task_name=task_name,
+                test_num=test_num,
+                fps=float(recorder_config.get("fps", 30.0)),
+                jpeg_quality=int(recorder_config.get("jpeg_quality", 95)),
+            )
         tools = RobotTwinTools(
             env=adapter,
             policy=self.policy,
             output_dir=output_dir,
             audit_path=audit_path,
             read_roots=[memory_dir, reference_dir],
+            recorder=recorder,
         )
 
         # Environment variables are explicit per-run launcher overrides. Read
         # them before YAML defaults so a smoke test can be tuned without
-        # editing deploy_policy.yml.
+        # editing deploy_policy.yaml.
         planner_type = str(
             os.environ.get("ROBOTWIN_HARNESS_PLANNER")
             or self.config.get("planner")
@@ -213,12 +232,20 @@ class RobotTwinHarnessPolicy:
         # Mark the episode consumed only after planner construction and solve.
         # This keeps a failed initialization retryable if RoboTwin invokes the
         # hook again, while a completed Planner run remains idempotent.
-        planner_result = planner.solve(
-            system_prompt=system,
-            user_message=user,
-            toolkit=tools,
-            max_turns=max_turns,
-        )
+        try:
+            planner_result = planner.solve(
+                system_prompt=system,
+                user_message=user,
+                toolkit=tools,
+                max_turns=max_turns,
+            )
+        except BaseException as exc:
+            if recorder is not None:
+                try:
+                    recorder.abort(exc)
+                except Exception:
+                    logger.exception("failed to finalize RobotWin HDF5 after planner error")
+            raise
         if (
             planner_type in {"api", "pydantic_ai", "pydanticai"}
             and planner_result.error
@@ -235,12 +262,20 @@ class RobotTwinHarnessPolicy:
                 "planner interrupted by recoverable history error; "
                 "starting a fresh pydantic session from live RoboTwin state"
             )
-            planner_result = planner.solve(
-                system_prompt=system,
-                user_message=user,
-                toolkit=tools,
-                max_turns=max_turns,
-            )
+            try:
+                planner_result = planner.solve(
+                    system_prompt=system,
+                    user_message=user,
+                    toolkit=tools,
+                    max_turns=max_turns,
+                )
+            except BaseException as exc:
+                if recorder is not None:
+                    try:
+                        recorder.abort(exc)
+                    except Exception:
+                        logger.exception("failed to finalize RobotWin HDF5 after retry error")
+                raise
         self._has_run = True
         self.recipe_path = tools.write_recipe(recipe_tag)
         audit: dict[str, Any] = {}
@@ -261,10 +296,32 @@ class RobotTwinHarnessPolicy:
         )
         audit.setdefault("outcome", planner_result.finish_result)
         audit.setdefault("failure_reason", planner_result.error)
+        final_status = adapter.status()
+        finish_payload = planner_result.finish_result or {}
+        outcome_status = (
+            "success"
+            if final_status["success"]
+            else str(finish_payload.get("status") or ("error" if planner_result.error else "stuck"))
+        )
+        hdf5_path = None
+        if recorder is not None:
+            try:
+                hdf5_path = str(
+                    recorder.finalize(
+                        success=bool(final_status["success"]),
+                        status=outcome_status,
+                        outcome=finish_payload,
+                        failure_reason=planner_result.error,
+                    )
+                )
+            except Exception as exc:
+                logger.exception("failed to finalize RobotWin HDF5 recorder")
+                audit["hdf5_recorder_error"] = f"{type(exc).__name__}: {exc}"
         audit.update(
-            benchmark_success=adapter.status()["success"],
-            final_status=adapter.status(),
+            benchmark_success=final_status["success"],
+            final_status=final_status,
             memory_files_read=tools.artifact_summary()["files_read"],
+            hdf5=hdf5_path,
             **tools.artifact_summary(),
         )
         audit_path.write_text(
@@ -277,6 +334,7 @@ class RobotTwinHarnessPolicy:
             "error": planner_result.error,
             "recipe": self.recipe_path,
             "audit": str(audit_path),
+            "hdf5": hdf5_path,
             "prompt_profile": prompt_profile,
             "output_dir": str(output_dir),
         }

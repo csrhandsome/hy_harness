@@ -70,7 +70,7 @@ for task in "${TASKS[@]}"; do
         cd "${ROBOTWIN_DIR}"
         PYTHONWARNINGS=ignore::UserWarning \
         python -u script/eval_policy.py \
-            --config policy/hy_vla/deploy_policy.yml \
+            --config policy/hy_vla/deploy_policy.yaml \
             --overrides \
                 --task_name "${task}" \
                 --task_config "${TASK_CONFIG}" \

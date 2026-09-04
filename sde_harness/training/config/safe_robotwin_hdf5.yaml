@@ -1,0 +1,38 @@
+# SAFE / Agent-SAFE offline training on RobotWin Harness episode HDF5.
+#
+# This is intentionally separate from robotwin_eval/deploy_policy.yaml:
+# the latter configures the online policy/Harness run, whereas this file
+# configures the offline prefix cache, manifest and frozen-prefix critic.
+
+source: robotwin_harness_hdf5
+
+data:
+  # Root containing one Harness-produced <episode>.hdf5 per run.
+  hdf5_dir: /path/to/robotwin_harness_runs
+  # Keep prefixes separate from source episodes; the cache is checkpoint-bound.
+  prefix_dir: /path/to/robotwin_safe_prefix_cache
+  manifest: /path/to/robotwin_safe_manifest.jsonl
+  split_seed: 42
+  val_ratio: 0.05
+  test_ratio: 0.05
+
+prefix:
+  # Must be the exact checkpoint and MEM cadence used during RobotWin inference.
+  ckpt_path: /path/to/hy-vla-checkpoint
+  norm_path: null
+  vlm_model_path: null
+  stride: 1
+  img_history_size: 6
+  img_history_interval: 5
+
+safe:
+  output_dir: /path/to/robotwin_safe_checkpoint
+  architecture: prefix_risk_mlp
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  width: 512
+  dropout: 0.1
+  seed: 42
+  device: cuda

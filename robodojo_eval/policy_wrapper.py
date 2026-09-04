@@ -381,7 +381,7 @@ class HyVLARoboDojoPolicyWrapper:
 
 
 def build_policy(usr_args: dict[str, Any]) -> HyVLARoboDojoPolicyWrapper:
-    """Build a RoboDojo wrapper from a ``deploy_policy.yml``-style dict."""
+    """Build a RoboDojo wrapper from a ``deploy_policy.yaml``-style dict."""
     ckpt_path = usr_args["ckpt_path"]
     norm_path = usr_args.get("norm_path")
     if not norm_path and Path(ckpt_path).is_dir():

@@ -27,7 +27,7 @@ public symbols (the contract RoboTwin expects):
 
 Drop this directory under ``robotwin/policy/hy_vla/`` (or any other
 RoboTwin policy slot) and point ``--config`` at the bundled
-``deploy_policy.yml``.
+``deploy_policy.yaml``.
 """
 
 from __future__ import annotations
